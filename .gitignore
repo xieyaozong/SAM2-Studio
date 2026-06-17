@@ -27,7 +27,6 @@ outputs/
 
 # Large model checkpoints. Download locally, do not commit.
 checkpoints/*.pt
-demo/backend/checkpoints/*.pt
 
 # Notebook autosaves
 *-checkpoint.ipynb

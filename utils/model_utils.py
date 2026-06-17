@@ -35,7 +35,7 @@ def resolve_model_paths(config: SamBatchConfig) -> tuple[str, Path]:
 
     if not checkpoint.exists():
         raise FileNotFoundError(
-            f"Checkpoint not found: {checkpoint}. Run checkpoints/download_ckpts.sh "
+            f"Checkpoint not found: {checkpoint}. Run scripts/download_checkpoints.ps1 "
             "or choose another --checkpoint."
         )
     return model_cfg, checkpoint

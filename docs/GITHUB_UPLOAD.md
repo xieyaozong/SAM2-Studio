@@ -1,23 +1,22 @@
 # GitHub Upload Notes
 
-這個 repo 適合上傳「源碼 + 可重現打包設定」，不要把本機 runtime 和模型權重一起推上 Git。
+This repository is now structured as a personal application repo rather than a fork-style copy of Meta's SAM2 project. The upstream `sam2` package is installed through `requirements.txt`.
 
-## 建議 Commit 內容
+## Commit Source Code
 
 ```powershell
-git add .gitignore README.md requirements.txt SAM2Studio.spec sam2_studio.py run_sam_app.bat utils scripts docs
-git add sam2 setup.py pyproject.toml MANIFEST.in LICENSE LICENSE_cctorch checkpoints/download_ckpts.sh
+git add .
 git status --short
 git diff --cached --stat
-git commit -m "Add SAM2 Studio personal tool"
+git commit -m "Prepare SAM2 Studio personal tool"
 git push origin main
 ```
 
-如果你的預設分支不是 `main`，請把最後一行換成自己的分支名。
+Use your current branch name instead of `main` if needed.
 
-## 不要 Commit 的內容
+## Do Not Commit Local Artifacts
 
-這些檔案已在 `.gitignore` 內：
+These are ignored by `.gitignore`:
 
 ```text
 .venv/
@@ -30,18 +29,18 @@ build/
 dist/
 ```
 
-## 分享 Windows exe
+## Sharing the Windows App
 
-如果要讓別人直接用 exe，請把以下兩個放在同一層並壓成 zip：
+To distribute a ready-to-run Windows build, zip these together:
 
 ```text
 SAM2Studio.exe
 _internal/
 ```
 
-建議上傳到 GitHub Releases，不建議放進 git commit。
+Upload the zip to GitHub Releases or another file host. Avoid committing it directly; the runtime is several gigabytes because it includes PyTorch, PySide6, SAM2, and optionally checkpoint files.
 
-## Clone 後重建環境
+## Rebuild After Clone
 
 ```powershell
 git clone <your-repo-url>
@@ -50,19 +49,6 @@ python -m venv .venv
 .\.venv\Scripts\activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-```
-
-然後下載 SAM2.1 checkpoints 到 `checkpoints/`。
-
-## 重新打包
-
-```powershell
+.\scripts\download_checkpoints.ps1
 .\scripts\build_exe.ps1
-```
-
-打包完成後，根目錄會有：
-
-```text
-SAM2Studio.exe
-_internal/
 ```
