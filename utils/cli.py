@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import argparse
-import logging
-import sys
 from pathlib import Path
 from typing import Sequence
-
 from utils.batch import process_batch
 from utils.config import DEFAULT_EXTENSIONS, EXPORT_FORMATS, MODEL_PRESETS, SamBatchConfig
 from utils.io_utils import parse_extensions
 from utils.qt_gui import run_interactive_gui
+
+import argparse
+import logging
+import sys
 
 
 def positive_int(value: str) -> int:

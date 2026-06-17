@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-import csv
 from dataclasses import dataclass
 from pathlib import Path
+from utils.io_utils import save_png
+
+import csv
 
 import numpy as np
 
@@ -10,8 +12,6 @@ try:
     import cv2
 except Exception:  # pragma: no cover - keeps the main app importable without OpenCV.
     cv2 = None
-
-from utils.io_utils import save_png
 
 
 MIN_HOUGH_CONFIDENCE = 2.05
@@ -447,14 +447,14 @@ def preprocess_hough_circle(
     return HoughPreprocessResult(masked, crop, mask, debug, "circle", circle.method, metadata)
 
 
-def hough_output_name(image_path: Path, kind: str) -> str:
-    return f"{image_path.stem}_hough_{kind}.png"
+def hough_output_name(image_path: Path, output_variant: str) -> str:
+    return f"{image_path.stem}_hough_{output_variant}.png"
 
 
-def hough_result_image(result: HoughPreprocessResult, kind: str) -> np.ndarray:
-    if kind == "crop":
+def hough_result_image(result: HoughPreprocessResult, output_variant: str) -> np.ndarray:
+    if output_variant == "crop":
         return result.crop_rgb
-    if kind == "debug":
+    if output_variant == "debug":
         return result.debug_rgb
     return result.full_rgb
 

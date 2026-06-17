@@ -1,14 +1,7 @@
 from __future__ import annotations
 
-import os
-import queue
-import sys
-import threading
 from pathlib import Path
 from typing import Sequence
-
-import numpy as np
-import torch
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import (
     QColor,
@@ -47,11 +40,20 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 from sam2.sam2_image_predictor import SAM2ImagePredictor
-
-from utils.config import DEFAULT_EXTENSIONS, DEFAULT_IMAGE_SOURCE, EXPORT_FORMATS, MODEL_PRESETS, PROJECT_ROOT, SavedObject
-from utils.export_utils import render_interactive_overlay, render_yolo_polygon_overlay, save_interactive_results
+from utils.config import (
+    DEFAULT_EXTENSIONS,
+    EXPORT_FORMATS,
+    MODEL_PRESETS,
+    PREFERRED_IMAGE_FOLDER,
+    PROJECT_ROOT,
+    SavedObject,
+)
+from utils.export_utils import (
+    render_interactive_overlay,
+    render_yolo_polygon_overlay,
+    save_interactive_results,
+)
 from utils.hough_preprocess import (
     HoughPreprocessResult,
     HoughPreprocessSettings,
@@ -62,6 +64,14 @@ from utils.hough_preprocess import (
 )
 from utils.io_utils import collect_images, color_for_index, load_rgb_image
 from utils.model_utils import build_image_predictor, inference_autocast
+
+import os
+import queue
+import sys
+import threading
+
+import numpy as np
+import torch
 
 
 class SamCanvasView(QGraphicsView):
@@ -165,8 +175,8 @@ class PySideSamWindow(QMainWindow):
         self.hough_result: HoughPreprocessResult | None = None
         self.hough_preview_active = False
         self.hough_running = False
-        self.hough_pending_action: str | None = None
-        self.hough_pending_kind: str | None = None
+        self.hough_action_after_run: str | None = None
+        self.hough_requested_output: str | None = None
         self.dirty = False
 
         self.build_ui(default_model)
@@ -546,7 +556,7 @@ class PySideSamWindow(QMainWindow):
         candidates = [
             self.image_folder,
             self.image_path.parent if self.image_path is not None else None,
-            DEFAULT_IMAGE_SOURCE,
+            PREFERRED_IMAGE_FOLDER,
             PROJECT_ROOT,
         ]
         for candidate in candidates:
@@ -554,7 +564,7 @@ class PySideSamWindow(QMainWindow):
                 return str(candidate)
         return ""
 
-    def selected_hough_kind(self) -> str:
+    def selected_hough_output(self) -> str:
         return str(self.hough_image_combo.currentData() or "full")
 
     def set_working_image(
@@ -578,9 +588,9 @@ class PySideSamWindow(QMainWindow):
     def refresh_hough_preview(self) -> None:
         if self.hough_result is None or not self.hough_preview_active or self.image_path is None:
             return
-        kind = "debug" if self.hough_debug_check.isChecked() else self.selected_hough_kind()
-        image = hough_result_image(self.hough_result, kind)
-        image_name = hough_output_name(self.image_path, kind)
+        output_variant = "debug" if self.hough_debug_check.isChecked() else self.selected_hough_output()
+        image = hough_result_image(self.hough_result, output_variant)
+        image_name = hough_output_name(self.image_path, output_variant)
         self.set_working_image(
             image,
             image_name,
@@ -591,16 +601,16 @@ class PySideSamWindow(QMainWindow):
         self.image_ready = False
 
     def preview_hough_preprocess(self) -> None:
-        self.start_hough_preprocess("preview")
+        self.run_hough_preprocess(action_after_run="preview")
 
-    def start_hough_preprocess(self, action: str, kind: str | None = None) -> None:
+    def run_hough_preprocess(self, action_after_run: str, output_variant: str | None = None) -> None:
         if self.image_path is None or self.original_image_np is None:
             self.set_status("Open an image first")
             return
         if self.hough_running:
-            if action == "use":
-                self.hough_pending_action = "use"
-                self.hough_pending_kind = kind or self.selected_hough_kind()
+            if action_after_run == "use":
+                self.hough_action_after_run = "use"
+                self.hough_requested_output = output_variant or self.selected_hough_output()
                 self.set_status("Hough preprocessing is running. Will use result for SAM.")
             else:
                 self.set_status("Hough preprocessing is running")
@@ -608,18 +618,18 @@ class PySideSamWindow(QMainWindow):
         if not self.hough_preview_active and not self.confirm_discard_work():
             return
 
-        source_path = self.image_path
+        image_path = self.image_path
         source_image = self.original_image_np.copy()
         settings = self.hough_settings()
         self.hough_running = True
-        self.hough_pending_action = action
-        self.hough_pending_kind = kind or self.selected_hough_kind()
+        self.hough_action_after_run = action_after_run
+        self.hough_requested_output = output_variant or self.selected_hough_output()
         self.set_status("Running Hough preprocessing")
 
         def worker() -> None:
             try:
-                result = preprocess_hough_circle(source_image, settings)
-                self.messages.put(("hough_ready", (source_path, result)))
+                hough_result = preprocess_hough_circle(source_image, settings)
+                self.messages.put(("hough_ready", (image_path, hough_result)))
             except Exception as exc:
                 self.messages.put(("hough_error", str(exc)))
 
@@ -630,23 +640,23 @@ class PySideSamWindow(QMainWindow):
             self.set_status("Open an image first")
             return
         if self.hough_result is None:
-            self.start_hough_preprocess("use", self.selected_hough_kind())
+            self.run_hough_preprocess(action_after_run="use", output_variant=self.selected_hough_output())
             return
         if not self.hough_preview_active and not self.confirm_discard_work():
             return
 
-        kind = self.selected_hough_kind()
-        self.use_hough_result_for_sam(kind)
+        output_variant = self.selected_hough_output()
+        self.use_hough_image_for_sam(output_variant)
 
-    def use_hough_result_for_sam(self, kind: str) -> None:
+    def use_hough_image_for_sam(self, output_variant: str) -> None:
         if self.image_path is None or self.hough_result is None:
             return
-        image = hough_result_image(self.hough_result, kind)
+        image = hough_result_image(self.hough_result, output_variant)
         self.hough_preview_active = False
         self.set_working_image(
             image,
-            hough_output_name(self.image_path, kind),
-            f"Using Hough {kind} image for SAM",
+            hough_output_name(self.image_path, output_variant),
+            f"Using Hough {output_variant} image for SAM",
             prepare_sam=True,
             fit=True,
         )
@@ -840,11 +850,11 @@ class PySideSamWindow(QMainWindow):
     def poll_messages(self) -> None:
         try:
             while True:
-                kind, payload = self.messages.get_nowait()
-                if kind == "status":
-                    self.set_status(str(payload))
-                elif kind == "model_ready":
-                    predictor, device, requested = payload
+                message_type, message_data = self.messages.get_nowait()
+                if message_type == "status":
+                    self.set_status(str(message_data))
+                elif message_type == "model_ready":
+                    predictor, device, requested = message_data
                     self.predictor = predictor
                     self.device = device
                     self.model_key = requested
@@ -852,8 +862,8 @@ class PySideSamWindow(QMainWindow):
                     self.set_status(f"Model ready on {device}")
                     if self.image_np is not None:
                         self.embed_current_image_async()
-                elif kind == "image_ready":
-                    version = int(payload)
+                elif message_type == "image_ready":
+                    version = int(message_data)
                     if version != self.image_version:
                         self.embedding = False
                         if self.image_np is not None and not self.hough_preview_active:
@@ -863,8 +873,8 @@ class PySideSamWindow(QMainWindow):
                     self.image_ready = True
                     self.set_status("Image ready")
                     self.render_canvas()
-                elif kind == "prediction":
-                    version, mask, score = payload
+                elif message_type == "prediction":
+                    version, mask, score = message_data
                     self.predicting = False
                     if version == self.point_version:
                         self.current_mask = mask
@@ -874,37 +884,37 @@ class PySideSamWindow(QMainWindow):
                     if self.pending_prediction or version != self.point_version:
                         self.pending_prediction = False
                         self.predict_current_mask_async()
-                elif kind == "error":
+                elif message_type == "error":
                     self.model_loading = False
                     self.embedding = False
                     self.predicting = False
-                    self.set_status(str(payload))
-                    QMessageBox.critical(self, "SAM 2 Studio", str(payload))
-                elif kind == "hough_ready":
-                    source_path, result = payload
+                    self.set_status(str(message_data))
+                    QMessageBox.critical(self, "SAM 2 Studio", str(message_data))
+                elif message_type == "hough_ready":
+                    image_path, hough_result = message_data
                     self.hough_running = False
-                    if source_path != self.image_path:
-                        self.hough_pending_action = None
-                        self.hough_pending_kind = None
+                    if image_path != self.image_path:
+                        self.hough_action_after_run = None
+                        self.hough_requested_output = None
                         continue
-                    self.hough_result = result
-                    pending_action = self.hough_pending_action or "preview"
-                    pending_kind = self.hough_pending_kind or self.selected_hough_kind()
-                    self.hough_pending_action = None
-                    self.hough_pending_kind = None
-                    if pending_action == "use":
-                        self.use_hough_result_for_sam(pending_kind)
-                        self.set_status(f"Using Hough {pending_kind}: {result.method}")
+                    self.hough_result = hough_result
+                    action_after_run = self.hough_action_after_run or "preview"
+                    output_variant = self.hough_requested_output or self.selected_hough_output()
+                    self.hough_action_after_run = None
+                    self.hough_requested_output = None
+                    if action_after_run == "use":
+                        self.use_hough_image_for_sam(output_variant)
+                        self.set_status(f"Using Hough {output_variant}: {hough_result.method}")
                     else:
                         self.hough_preview_active = True
                         self.refresh_hough_preview()
-                        self.set_status(f"Hough {result.mode}: {result.method}")
-                elif kind == "hough_error":
+                        self.set_status(f"Hough {hough_result.mode}: {hough_result.method}")
+                elif message_type == "hough_error":
                     self.hough_running = False
-                    self.hough_pending_action = None
-                    self.hough_pending_kind = None
-                    self.set_status(str(payload))
-                    QMessageBox.critical(self, "Hough preprocessing", str(payload))
+                    self.hough_action_after_run = None
+                    self.hough_requested_output = None
+                    self.set_status(str(message_data))
+                    QMessageBox.critical(self, "Hough preprocessing", str(message_data))
         except queue.Empty:
             pass
 

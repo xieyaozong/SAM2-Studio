@@ -1,14 +1,8 @@
 from __future__ import annotations
 
-import csv
-import logging
 from pathlib import Path
-
-import numpy as np
-import torch
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 from tqdm import tqdm
-
 from utils.config import LogFn, ProcessResult, SamBatchConfig
 from utils.export_utils import (
     build_class_label_mask,
@@ -28,6 +22,12 @@ from utils.io_utils import (
     wants_yolo_export,
 )
 from utils.model_utils import build_mask_generator, inference_autocast
+
+import csv
+import logging
+
+import numpy as np
+import torch
 
 
 def save_individual_masks(paths, annotations: list[dict]) -> None:
@@ -208,4 +208,3 @@ def process_batch(config: SamBatchConfig, log: LogFn = print, progress: bool = T
         f"Summary: {summary_path}"
     )
     return results
-

@@ -1,10 +1,19 @@
 from __future__ import annotations
 
-import csv
-import json
 from collections import defaultdict
 from pathlib import Path
 from typing import Sequence
+from utils.config import SavedObject
+from utils.io_utils import (
+    color_for_index,
+    save_png,
+    save_training_image,
+    wants_mask_export,
+    wants_yolo_export,
+)
+
+import csv
+import json
 
 import numpy as np
 
@@ -12,9 +21,6 @@ try:
     import cv2
 except ImportError:
     cv2 = None
-
-from utils.config import SavedObject
-from utils.io_utils import save_png, save_training_image
 
 
 def sorted_annotations(annotations: list[dict], max_masks: int) -> list[dict]:
@@ -33,8 +39,6 @@ def render_masks(
     label_dtype = np.uint16 if len(annotations) <= np.iinfo(np.uint16).max else np.uint32
     label_mask = np.zeros(image.shape[:2], dtype=label_dtype)
     color_mask = np.zeros_like(image, dtype=np.uint8)
-
-    from utils.io_utils import color_for_index
 
     for mask_id, annotation in enumerate(annotations, start=1):
         mask = np.asarray(annotation["segmentation"], dtype=bool)
@@ -449,8 +453,6 @@ def save_interactive_results(
     save_object_masks: bool = False,
     image_name: str | None = None,
 ) -> dict[str, Path]:
-    from utils.io_utils import wants_mask_export, wants_yolo_export
-
     output_dir.mkdir(parents=True, exist_ok=True)
     output_image_name = image_name or image_path.name
     stem = Path(output_image_name).stem

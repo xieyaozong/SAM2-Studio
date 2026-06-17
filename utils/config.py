@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-import sys
 from typing import Callable
+
+import os
+import sys
 
 import numpy as np
 
@@ -23,7 +25,11 @@ def resource_root() -> Path:
 APP_ROOT = app_root()
 RESOURCE_ROOT = resource_root()
 PROJECT_ROOT = APP_ROOT
-DEFAULT_IMAGE_SOURCE = Path(r"C:\work\hubrain\segmentation-test-assets\images\AI_Images_20260615")
+PREFERRED_IMAGE_FOLDER = (
+    Path(os.environ["SAM2_STUDIO_IMAGE_DIR"]).expanduser()
+    if os.environ.get("SAM2_STUDIO_IMAGE_DIR")
+    else None
+)
 
 DEFAULT_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff")
 EXPORT_FORMATS = ("yolo", "mask", "both", "none")

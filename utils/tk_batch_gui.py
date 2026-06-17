@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import queue
-import threading
 from pathlib import Path
-
 from utils.batch import process_batch
 from utils.config import EXPORT_FORMATS, MODEL_PRESETS, SamBatchConfig
+
+import queue
+import threading
 
 
 def _positive_int(value: str) -> int:
@@ -178,12 +178,12 @@ def run_batch_gui() -> None:
     def poll_messages() -> None:
         try:
             while True:
-                kind, message = messages.get_nowait()
+                message_type, message = messages.get_nowait()
                 append_log(message)
-                if kind in {"done", "error"}:
+                if message_type in {"done", "error"}:
                     running.set(False)
                     start_button.configure(state="normal")
-                    if kind == "error":
+                    if message_type == "error":
                         messagebox.showerror("SAM 2 batch app", message)
         except queue.Empty:
             pass

@@ -17,6 +17,7 @@ build/
 dist/
 _internal/
 SAM2Studio.exe
+*.spec
 _C.*
 
 # Local outputs and generated datasets

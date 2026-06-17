@@ -2,14 +2,12 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from pathlib import Path
-
-import torch
-
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
-
 from utils.config import LogFn, MODEL_PRESETS, PROJECT_ROOT, RESOURCE_ROOT, SamBatchConfig
+
+import torch
 
 
 def select_device(device_name: str) -> torch.device:

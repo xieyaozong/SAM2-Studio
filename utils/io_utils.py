@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import colorsys
 from pathlib import Path
 from typing import Iterable, Sequence
+from PIL import Image, ImageOps
+from utils.config import DEFAULT_EXTENSIONS, OutputPaths
+
+import colorsys
 
 import numpy as np
-from PIL import Image, ImageOps
-
-from utils.config import DEFAULT_EXTENSIONS, OutputPaths
 
 
 def parse_extensions(raw: str | Sequence[str]) -> tuple[str, ...]:
@@ -116,4 +116,3 @@ def wants_yolo_export(export_format: str) -> bool:
 
 def wants_mask_export(export_format: str) -> bool:
     return export_format in {"mask", "both"}
-

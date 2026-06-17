@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 
 def same_python(left: Path, right: Path) -> bool:
