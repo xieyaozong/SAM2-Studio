@@ -1,11 +1,33 @@
+# Editors and OS files
 .vscode/
 .DS_Store
+
+# Python caches and local environments
 __pycache__/
-*-checkpoint.ipynb
-.venv
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
 *.egg*
-build/*
+SAM_2.egg-info/
+
+# Build artifacts
+build/
+dist/
+_internal/
+SAM2Studio.exe
 _C.*
-outputs/*
+
+# Local outputs and generated datasets
+outputs/
+**/sam2_dataset/
+**/sam2_interactive_results/
+**/preprocess/
+
+# Large model checkpoints. Download locally, do not commit.
 checkpoints/*.pt
 demo/backend/checkpoints/*.pt
+
+# Notebook autosaves
+*-checkpoint.ipynb
