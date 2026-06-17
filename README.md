@@ -7,37 +7,36 @@
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white&style=flat-square)
 ![License](https://img.shields.io/badge/License-Apache_2.0-d97706?style=flat-square)
 
-A compact **Windows desktop app for interactive image segmentation** with Meta's Segment Anything Model 2. It keeps the project focused on the annotation tool itself — SAM2 is installed from Meta's upstream repository instead of being vendored here.
+Windows desktop app for interactive image segmentation with Meta's Segment Anything Model 2. SAM2 is installed from Meta's upstream repository instead of being vendored here.
 
 ![Workflow](assets/workflow.png)
 
-## Features
+## What It Does
 
-- 🖼️ Open a single image or step through a folder.
-- 🟢🔴 Add foreground / background clicks to guide SAM2.
-- ✨ Optional Hough / foreground preprocessing before annotation.
-- ✂️ Use the full masked image or an adaptive center crop.
-- 📦 Export YOLO segmentation labels, mask images, overlays, and object metadata.
-- 🪟 Build a single-window Windows executable (no terminal).
+- Opens a single image or steps through a folder.
+- Adds foreground and background clicks to guide SAM2.
+- Applies optional Hough or foreground preprocessing before annotation.
+- Uses the full masked image or an adaptive center crop.
+- Exports YOLO segmentation labels, mask images, overlays, and object metadata.
+- Builds a single-window Windows executable.
 
 ## Interface
 
 ![Interface layout](assets/interface.png)
 
-> Schematic of the app layout: image canvas with foreground/background clicks and the predicted
-> mask overlay, plus the model / preprocessing / export sidebar.
+The app centers on an image canvas with foreground/background clicks and the predicted mask overlay, plus a sidebar for model, preprocessing, and export settings.
 
-## Project Structure
+## Layout
 
 ```text
 SAM2-Studio/
-├── sam2_studio.py       # app entry point
-├── run_sam_app.bat      # local launcher for the virtual environment
-├── requirements.txt     # Python dependencies
-├── assets/              # README workflow + interface visuals
-├── utils/               # GUI, preprocessing, export, model, and IO code
-├── scripts/             # build and checkpoint helper scripts
-└── checkpoints/         # local model weights (*.pt are git-ignored)
+  sam2_studio.py
+  run_sam_app.bat
+  requirements.txt
+  assets/
+  utils/
+  scripts/
+  checkpoints/
 ```
 
 ## Installation
@@ -62,37 +61,37 @@ For a specific CUDA build, install PyTorch first from the official selector, the
 Expected files under `checkpoints/`:
 
 ```text
-sam2.1_hiera_tiny.pt     sam2.1_hiera_small.pt
-sam2.1_hiera_base_plus.pt  sam2.1_hiera_large.pt
+sam2.1_hiera_tiny.pt
+sam2.1_hiera_small.pt
+sam2.1_hiera_base_plus.pt
+sam2.1_hiera_large.pt
 ```
 
 ## Run
 
 ```powershell
 .\.venv\Scripts\python.exe sam2_studio.py --gui
-# or
 .\run_sam_app.bat
 ```
 
 Optional: set `SAM2_STUDIO_IMAGE_DIR` to start the image picker in a specific folder.
 
-## Build the Windows App
+## Build The Windows App
 
 ```powershell
 .\scripts\build_exe.ps1
 ```
 
-Output is placed at the repo root as `SAM2Studio.exe` + `_internal/`. Keep both together — the
-executable needs `_internal/` to find Python, PySide6, PyTorch, SAM2, and the packaged checkpoints.
+Output is placed at the repo root as `SAM2Studio.exe` and `_internal/`. Keep both together; the executable needs `_internal/` to find Python, PySide6, PyTorch, SAM2, and the packaged checkpoints.
 
 ## Notes
 
 - `SAM2Studio.exe`, `_internal/`, `.venv/`, `outputs/`, and `checkpoints/*.pt` are git-ignored.
 - To share a ready-to-run build, zip `SAM2Studio.exe` and `_internal/` together.
-- To rebuild from source: install requirements → download checkpoints → run `scripts/build_exe.ps1`.
+- To rebuild from source: install requirements, download checkpoints, and run `scripts/build_exe.ps1`.
 
-## Attribution & License
+## Attribution And License
 
-SAM2 Studio depends on Meta's [Segment Anything Model 2](https://github.com/facebookresearch/sam2).
-Review Meta's SAM2 license and model terms before redistributing checkpoints or packaged builds.
+SAM2 Studio depends on Meta's [Segment Anything Model 2](https://github.com/facebookresearch/sam2). Review Meta's SAM2 license and model terms before redistributing checkpoints or packaged builds.
+
 This project's own code is released under the [Apache License 2.0](LICENSE).

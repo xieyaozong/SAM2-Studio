@@ -7,7 +7,7 @@ from utils.bootstrap import bootstrap_venv_python
 
 bootstrap_venv_python(Path(__file__).resolve().parent)
 
-from utils.cli import main  # noqa: E402
+from utils.cli import main
 
 
 if __name__ == "__main__":

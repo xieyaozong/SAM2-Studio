@@ -23,8 +23,8 @@ def _non_negative_int(value: str) -> int:
 
 
 def run_batch_gui() -> None:
-    import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
+    import tkinter as tk
 
     root = tk.Tk()
     root.title("SAM 2 Batch Image App")

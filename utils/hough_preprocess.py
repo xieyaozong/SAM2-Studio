@@ -10,7 +10,7 @@ import numpy as np
 
 try:
     import cv2
-except Exception:  # pragma: no cover - keeps the main app importable without OpenCV.
+except Exception:
     cv2 = None
 
 
