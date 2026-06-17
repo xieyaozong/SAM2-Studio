@@ -1,28 +1,46 @@
 # SAM2 Studio
 
-SAM2 Studio is a compact Windows desktop app for interactive image segmentation with Meta's Segment Anything Model 2. It keeps the project focused on the annotation tool itself: SAM2 is installed from Meta's upstream repository instead of being copied into this repo.
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white&style=flat-square)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.5%2B-EE4C2C?logo=pytorch&logoColor=white&style=flat-square)
+![PySide6](https://img.shields.io/badge/GUI-PySide6-41CD52?logo=qt&logoColor=white&style=flat-square)
+![SAM2](https://img.shields.io/badge/Model-SAM2-1877F2?style=flat-square)
+![Platform](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white&style=flat-square)
+![License](https://img.shields.io/badge/License-Apache_2.0-d97706?style=flat-square)
 
-## What It Does
+A compact **Windows desktop app for interactive image segmentation** with Meta's Segment Anything Model 2. It keeps the project focused on the annotation tool itself — SAM2 is installed from Meta's upstream repository instead of being vendored here.
 
-- Open a single image or walk through a folder of images.
-- Add foreground and background clicks to guide SAM2.
-- Preview or apply Hough / foreground preprocessing before annotation.
-- Use either the full masked image or an adaptive center crop.
-- Export YOLO segmentation labels, mask images, overlays, and object metadata.
-- Build a Windows executable that opens without a terminal window.
+![Workflow](assets/workflow.png)
 
-## Project Layout
+## Features
+
+- 🖼️ Open a single image or step through a folder.
+- 🟢🔴 Add foreground / background clicks to guide SAM2.
+- ✨ Optional Hough / foreground preprocessing before annotation.
+- ✂️ Use the full masked image or an adaptive center crop.
+- 📦 Export YOLO segmentation labels, mask images, overlays, and object metadata.
+- 🪟 Build a single-window Windows executable (no terminal).
+
+## Interface
+
+![Interface layout](assets/interface.png)
+
+> Schematic of the app layout: image canvas with foreground/background clicks and the predicted
+> mask overlay, plus the model / preprocessing / export sidebar.
+
+## Project Structure
 
 ```text
-sam2_studio.py          # App entry point
-run_sam_app.bat         # Local launcher for the virtual environment
-requirements.txt        # Python dependencies
-utils/                  # GUI, preprocessing, export, model, and IO code
-scripts/                # Build and checkpoint helper scripts
-checkpoints/            # Local model weights; *.pt files are ignored
+SAM2-Studio/
+├── sam2_studio.py       # app entry point
+├── run_sam_app.bat      # local launcher for the virtual environment
+├── requirements.txt     # Python dependencies
+├── assets/              # README workflow + interface visuals
+├── utils/               # GUI, preprocessing, export, model, and IO code
+├── scripts/             # build and checkpoint helper scripts
+└── checkpoints/         # local model weights (*.pt are git-ignored)
 ```
 
-## Install
+## Installation
 
 Python 3.11 is recommended.
 
@@ -33,7 +51,7 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-If you need a specific CUDA build of PyTorch, install PyTorch first from the official selector, then install the rest of the requirements.
+For a specific CUDA build, install PyTorch first from the official selector, then the rest.
 
 ## Download Checkpoints
 
@@ -41,28 +59,22 @@ If you need a specific CUDA build of PyTorch, install PyTorch first from the off
 .\scripts\download_checkpoints.ps1
 ```
 
-The app expects these files under `checkpoints/`:
+Expected files under `checkpoints/`:
 
 ```text
-sam2.1_hiera_tiny.pt
-sam2.1_hiera_small.pt
-sam2.1_hiera_base_plus.pt
-sam2.1_hiera_large.pt
+sam2.1_hiera_tiny.pt     sam2.1_hiera_small.pt
+sam2.1_hiera_base_plus.pt  sam2.1_hiera_large.pt
 ```
 
 ## Run
 
 ```powershell
 .\.venv\Scripts\python.exe sam2_studio.py --gui
-```
-
-or:
-
-```powershell
+# or
 .\run_sam_app.bat
 ```
 
-Optional: set `SAM2_STUDIO_IMAGE_DIR` if you want the image picker to start in a specific folder.
+Optional: set `SAM2_STUDIO_IMAGE_DIR` to start the image picker in a specific folder.
 
 ## Build the Windows App
 
@@ -70,25 +82,17 @@ Optional: set `SAM2_STUDIO_IMAGE_DIR` if you want the image picker to start in a
 .\scripts\build_exe.ps1
 ```
 
-The build output is placed at the repo root:
-
-```text
-SAM2Studio.exe
-_internal/
-```
-
-Keep both items together. The executable needs `_internal/` to find Python, PySide6, PyTorch, SAM2, and the packaged checkpoints.
+Output is placed at the repo root as `SAM2Studio.exe` + `_internal/`. Keep both together — the
+executable needs `_internal/` to find Python, PySide6, PyTorch, SAM2, and the packaged checkpoints.
 
 ## Notes
 
-- `SAM2Studio.exe`, `_internal/`, `.venv/`, `outputs/`, and `checkpoints/*.pt` are ignored by git.
+- `SAM2Studio.exe`, `_internal/`, `.venv/`, `outputs/`, and `checkpoints/*.pt` are git-ignored.
 - To share a ready-to-run build, zip `SAM2Studio.exe` and `_internal/` together.
-- To rebuild from source, install requirements, download checkpoints, then run `scripts/build_exe.ps1`.
+- To rebuild from source: install requirements → download checkpoints → run `scripts/build_exe.ps1`.
 
-## Attribution
+## Attribution & License
 
-SAM2 Studio depends on Meta's Segment Anything Model 2:
-
-https://github.com/facebookresearch/sam2
-
-Please review Meta's SAM2 license and model terms before redistributing checkpoints or packaged builds.
+SAM2 Studio depends on Meta's [Segment Anything Model 2](https://github.com/facebookresearch/sam2).
+Review Meta's SAM2 license and model terms before redistributing checkpoints or packaged builds.
+This project's own code is released under the [Apache License 2.0](LICENSE).
