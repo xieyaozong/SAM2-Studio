@@ -528,10 +528,10 @@ class PySideSamWindow(QMainWindow):
         cancel_polygon.clicked.connect(self.cancel_draft_polygon)
         layout.addWidget(cancel_polygon)
 
-        delete_polygon = QPushButton("Delete Selected Polygon")
-        delete_polygon.setProperty("danger", True)
-        delete_polygon.clicked.connect(self.delete_selected_polygon)
-        layout.addWidget(delete_polygon)
+        delete_vertex = QPushButton("Delete Selected Vertex")
+        delete_vertex.setProperty("danger", True)
+        delete_vertex.clicked.connect(self.delete_selected_vertex)
+        layout.addWidget(delete_vertex)
 
     def make_panel(self) -> QFrame:
         frame = QFrame()
@@ -1207,7 +1207,7 @@ class PySideSamWindow(QMainWindow):
     def polygon_hit_threshold(self) -> float:
         transform = self.canvas.transform()
         scale = max(abs(transform.m11()), 0.1)
-        return max(4.0, 10.0 / scale)
+        return max(6.0, 14.0 / scale)
 
     @staticmethod
     def distance_to_segment(
@@ -1263,6 +1263,60 @@ class PySideSamWindow(QMainWindow):
             return None
         return target_index, best[1], best[2]
 
+    def insert_vertex_on_edge(self, edge: tuple[int, int, int], x: float, y: float) -> tuple[int, int, int] | None:
+        target_index, polygon_index, insert_index = edge
+        points = self.polygons_for_target(target_index)[polygon_index].get("points", [])
+        if not hasattr(points, "insert"):
+            return None
+        if insert_index > len(points):
+            insert_index = len(points)
+        points.insert(insert_index, (x, y))  # type: ignore[attr-defined]
+        self.selected_polygon_index = polygon_index
+        self.selected_vertex_index = insert_index
+        self.edit_drag_target = (target_index, polygon_index, insert_index)
+        self.rebuild_target_mask_from_polygons(target_index)
+        self.update_object_list()
+        self.render_canvas()
+        return target_index, polygon_index, insert_index
+
+    def delete_vertex(self, target_index: int, polygon_index: int, vertex_index: int) -> bool:
+        polygons = self.polygons_for_target(target_index)
+        if not (0 <= polygon_index < len(polygons)):
+            return False
+        points = polygons[polygon_index].get("points", [])
+        if not (0 <= vertex_index < len(points)):
+            return False
+        if len(points) <= 3:
+            self.set_status("Polygon needs at least 3 vertices")
+            return False
+        del points[vertex_index]  # type: ignore[index]
+        self.selected_polygon_index = polygon_index
+        self.selected_vertex_index = -1
+        self.edit_drag_target = None
+        self.rebuild_target_mask_from_polygons(target_index)
+        self.update_object_list()
+        self.render_canvas()
+        return True
+
+    def closest_edge_vertex(
+        self,
+        edge: tuple[int, int, int],
+        x: float,
+        y: float,
+    ) -> tuple[int, int, int] | None:
+        target_index, polygon_index, insert_index = edge
+        points = list(self.polygons_for_target(target_index)[polygon_index].get("points", []))
+        if len(points) < 3:
+            return None
+        previous_index = (insert_index - 1) % len(points)
+        next_index = insert_index % len(points)
+        previous = points[previous_index]
+        next_point = points[next_index]
+        previous_distance = float(np.hypot(float(previous[0]) - x, float(previous[1]) - y))
+        next_distance = float(np.hypot(float(next_point[0]) - x, float(next_point[1]) - y))
+        vertex_index = previous_index if previous_distance <= next_distance else next_index
+        return target_index, polygon_index, vertex_index
+
     def rebuild_object_mask_from_polygons(self, object_index: int) -> None:
         self.rebuild_target_mask_from_polygons(object_index)
 
@@ -1303,21 +1357,13 @@ class PySideSamWindow(QMainWindow):
         self.render_canvas()
         self.set_status("Draft polygon canceled")
 
-    def delete_selected_polygon(self) -> None:
+    def delete_selected_vertex(self) -> None:
         target_index = self.active_polygon_target_index()
-        if target_index is None or self.selected_polygon_index < 0:
-            self.set_status("No polygon selected")
+        if target_index is None or self.selected_polygon_index < 0 or self.selected_vertex_index < 0:
+            self.set_status("No vertex selected")
             return
-        polygons = self.polygons_for_target(target_index)
-        if not (0 <= self.selected_polygon_index < len(polygons)):
-            return
-        del polygons[self.selected_polygon_index]
-        self.selected_polygon_index = -1
-        self.selected_vertex_index = -1
-        self.rebuild_target_mask_from_polygons(target_index)
-        self.update_object_list()
-        self.render_canvas()
-        self.set_status("Polygon deleted")
+        if self.delete_vertex(target_index, self.selected_polygon_index, self.selected_vertex_index):
+            self.set_status("Vertex deleted")
 
     def handle_polygon_edit_event(self, event_type, x: float, y: float, button, modifiers) -> None:
         target_index = self.active_polygon_target_index()
@@ -1338,35 +1384,21 @@ class PySideSamWindow(QMainWindow):
             hit = self.nearest_polygon_vertex(x, y)
             if hit is not None:
                 target_index, polygon_index, vertex_index = hit
-                points = self.polygons_for_target(target_index)[polygon_index].get("points", [])
-                if len(points) > 3:
-                    del points[vertex_index]  # type: ignore[index]
-                    self.selected_polygon_index = polygon_index
-                    self.selected_vertex_index = -1
-                    self.rebuild_target_mask_from_polygons(target_index)
-                    self.update_object_list()
-                    self.render_canvas()
+                if self.delete_vertex(target_index, polygon_index, vertex_index):
                     self.set_status("Vertex deleted")
                 return
-            self.set_status("Right-click a vertex to delete it")
+            edge = self.nearest_polygon_edge(x, y)
+            if edge is not None:
+                edge_vertex = self.closest_edge_vertex(edge, x, y)
+                if edge_vertex is not None:
+                    target_index, polygon_index, vertex_index = edge_vertex
+                    if self.delete_vertex(target_index, polygon_index, vertex_index):
+                        self.set_status("Nearest vertex deleted")
+                    return
+            self.set_status("Right-click near a vertex to delete it")
             return
 
         if event_type == "press" and button == Qt.LeftButton:
-            if modifiers & Qt.ShiftModifier:
-                edge = self.nearest_polygon_edge(x, y)
-                if edge is not None:
-                    target_index, polygon_index, insert_index = edge
-                    points = self.polygons_for_target(target_index)[polygon_index].get("points", [])
-                    points.insert(insert_index, (x, y))  # type: ignore[attr-defined]
-                    self.selected_polygon_index = polygon_index
-                    self.selected_vertex_index = insert_index
-                    self.edit_drag_target = (target_index, polygon_index, insert_index)
-                    self.rebuild_target_mask_from_polygons(target_index)
-                    self.update_object_list()
-                    self.render_canvas()
-                    self.set_status("Vertex inserted")
-                    return
-
             hit = self.nearest_polygon_vertex(x, y)
             if hit is not None:
                 self.edit_drag_target = hit
@@ -1378,13 +1410,10 @@ class PySideSamWindow(QMainWindow):
 
             edge = self.nearest_polygon_edge(x, y)
             if edge is not None:
-                _object_index, polygon_index, _insert_index = edge
-                self.selected_polygon_index = polygon_index
-                self.selected_vertex_index = -1
-                self.render_canvas()
-                self.set_status("Polygon selected")
+                if self.insert_vertex_on_edge(edge, x, y) is not None:
+                    self.set_status("Vertex inserted")
                 return
-            self.set_status("Drag a vertex, Shift-click an edge, or start a new polygon")
+            self.set_status("Drag a vertex, click an edge to add a vertex, or start a new polygon")
             return
 
         if event_type == "move" and self.edit_drag_target is not None:
