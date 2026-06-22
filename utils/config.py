@@ -118,4 +118,4 @@ class SavedObject:
     color: np.ndarray
     score: float
     class_id: int = 0
-    edit_polygons: list[dict[str, object]] = field(default_factory=list)
+    yolo_polygons: list[dict[str, object]] = field(default_factory=list)

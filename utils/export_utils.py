@@ -139,18 +139,16 @@ def render_yolo_polygon_overlay(
 ) -> tuple[np.ndarray, int]:
     overlay = image.copy()
     height, width = image.shape[:2]
-    items: list[tuple[np.ndarray, np.ndarray, int]] = [
-        (saved.mask.astype(bool), saved.color, saved.class_id) for saved in saved_objects
+    items: list[tuple[list[list[tuple[float, float]]], np.ndarray, int]] = [
+        (yolo_export_polygons_for_saved_object(saved, epsilon=epsilon, min_area=min_area), saved.color, saved.class_id)
+        for saved in saved_objects
     ]
     if current_mask is not None:
         color = current_color if current_color is not None else np.array([56, 217, 197], dtype=np.uint8)
-        items.append((current_mask.astype(bool), color, int(current_class_id)))
+        items.append((mask_to_polygons(current_mask.astype(bool), epsilon=epsilon, min_area=min_area), color, int(current_class_id)))
 
     polygon_count = 0
-    for mask, color, class_id in items:
-        if mask.shape != (height, width):
-            continue
-        polygons = mask_to_polygons(mask, epsilon=epsilon, min_area=min_area)
+    for polygons, color, class_id in items:
         polygon_count += len(polygons)
         for polygon in polygons:
             points = np.rint(np.asarray(polygon, dtype=np.float32)).astype(np.int32)
@@ -203,7 +201,7 @@ def render_yolo_polygon_overlay(
     return np.clip(overlay, 0, 255).astype(np.uint8), polygon_count
 
 
-def render_edit_polygon_overlay(
+def render_yolo_edit_polygon_overlay(
     image: np.ndarray,
     saved_objects: Sequence[SavedObject],
     selected_object_index: int = -1,
@@ -219,7 +217,7 @@ def render_edit_polygon_overlay(
     for object_index, saved in enumerate(saved_objects):
         color = saved.color.astype(np.uint8)
         selected_object = object_index == selected_object_index
-        for polygon_index, item in enumerate(normalize_edit_polygons(saved.edit_polygons)):
+        for polygon_index, item in enumerate(normalize_yolo_edit_polygons(saved.yolo_polygons)):
             points = np.rint(np.asarray(item["points"], dtype=np.float32)).astype(np.int32)
             if len(points) < 2:
                 continue
@@ -287,7 +285,7 @@ def build_class_label_mask(
     return label_mask
 
 
-def normalize_edit_polygons(raw_polygons: Sequence[dict[str, object]] | None) -> list[dict[str, object]]:
+def normalize_yolo_edit_polygons(raw_polygons: Sequence[dict[str, object]] | None) -> list[dict[str, object]]:
     polygons: list[dict[str, object]] = []
     for item in raw_polygons or []:
         mode = str(item.get("mode", "add"))
@@ -303,6 +301,10 @@ def normalize_edit_polygons(raw_polygons: Sequence[dict[str, object]] | None) ->
         if len(points) >= 3:
             polygons.append({"mode": mode, "points": points})
     return polygons
+
+
+def mask_to_yolo_edit_polygons(mask: np.ndarray, epsilon: float = 2.0, min_area: float = 8.0) -> list[dict[str, object]]:
+    return [{"mode": "add", "points": polygon} for polygon in mask_to_polygons(mask, epsilon=epsilon, min_area=min_area)]
 
 
 def mask_to_edit_polygons(mask: np.ndarray, epsilon: float = 2.0, min_area: float = 8.0) -> list[dict[str, object]]:
@@ -333,14 +335,14 @@ def mask_to_edit_polygons(mask: np.ndarray, epsilon: float = 2.0, min_area: floa
     return polygons
 
 
-def edit_polygons_to_mask(
+def yolo_edit_polygons_to_mask(
     polygons: Sequence[dict[str, object]],
     image_shape: tuple[int, int] | tuple[int, int, int],
 ) -> np.ndarray:
     height = int(image_shape[0])
     width = int(image_shape[1])
     mask = np.zeros((height, width), dtype=np.uint8)
-    normalized = normalize_edit_polygons(polygons)
+    normalized = normalize_yolo_edit_polygons(polygons)
     if cv2 is not None:
         for item in normalized:
             points = np.rint(np.asarray(item["points"], dtype=np.float32)).astype(np.int32)
@@ -358,6 +360,13 @@ def edit_polygons_to_mask(
         value = 255 if item["mode"] == "add" else 0
         draw.polygon([(float(x), float(y)) for x, y in item["points"]], fill=value)
     return np.array(image, dtype=np.uint8).astype(bool)
+
+
+def edit_polygons_to_mask(
+    polygons: Sequence[dict[str, object]],
+    image_shape: tuple[int, int] | tuple[int, int, int],
+) -> np.ndarray:
+    return yolo_edit_polygons_to_mask(polygons, image_shape)
 
 
 def bbox_from_mask(mask: np.ndarray) -> list[int]:
@@ -542,6 +551,23 @@ def mask_to_polygons(mask: np.ndarray, epsilon: float = 2.0, min_area: float = 8
     return polygons
 
 
+def yolo_export_polygons_for_saved_object(
+    saved: SavedObject,
+    epsilon: float = 2.0,
+    min_area: float = 8.0,
+) -> list[list[tuple[float, float]]]:
+    polygons = []
+    for item in normalize_yolo_edit_polygons(saved.yolo_polygons):
+        if item["mode"] != "add":
+            continue
+        points = [(float(x), float(y)) for x, y in item["points"]]  # type: ignore[index]
+        if len(points) >= 3 and abs(polygon_area(points)) > min_area:
+            polygons.append(points)
+    if polygons:
+        return polygons
+    return mask_to_polygons(saved.mask, epsilon=epsilon, min_area=min_area)
+
+
 def format_yolo_polygon_line(
     class_id: int,
     polygon: Sequence[tuple[float, float]],
@@ -572,6 +598,26 @@ def write_yolo_segmentation_label(
         for polygon in mask_to_polygons(mask, epsilon=epsilon, min_area=min_area):
             if len(polygon) >= 3:
                 lines.append(format_yolo_polygon_line(class_id, polygon, width, height))
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    return len(lines)
+
+
+def write_saved_objects_yolo_segmentation_label(
+    path: Path,
+    saved_objects: Sequence[SavedObject],
+    image_shape: tuple[int, int] | tuple[int, int, int],
+    epsilon: float = 2.0,
+    min_area: float = 8.0,
+) -> int:
+    height = int(image_shape[0])
+    width = int(image_shape[1])
+    lines: list[str] = []
+    for saved in saved_objects:
+        for polygon in yolo_export_polygons_for_saved_object(saved, epsilon=epsilon, min_area=min_area):
+            if len(polygon) >= 3:
+                lines.append(format_yolo_polygon_line(saved.class_id, polygon, width, height))
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
@@ -663,7 +709,7 @@ def write_saved_objects_csv(path: Path, saved_objects: Sequence[SavedObject]) ->
                     "bbox_xywh": json.dumps(bbox_from_mask(saved.mask), ensure_ascii=False),
                     "score": saved.score,
                     "color_rgb": json.dumps([int(value) for value in saved.color], ensure_ascii=False),
-                    "polygon_count": len(normalize_edit_polygons(saved.edit_polygons)),
+                    "polygon_count": len(normalize_yolo_edit_polygons(saved.yolo_polygons)),
                 }
             )
 
@@ -711,10 +757,9 @@ def save_interactive_results(
         outputs["mask_label"] = mask_label_path
 
     if wants_yolo_export(export_format):
-        write_yolo_segmentation_label(
+        write_saved_objects_yolo_segmentation_label(
             yolo_label_path,
-            masks,
-            class_ids,
+            saved_objects,
             image.shape,
             epsilon=yolo_epsilon,
             min_area=yolo_min_area,

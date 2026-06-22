@@ -50,12 +50,12 @@ from utils.config import (
     SavedObject,
 )
 from utils.export_utils import (
-    edit_polygons_to_mask,
-    mask_to_edit_polygons,
+    mask_to_yolo_edit_polygons,
     render_interactive_overlay,
-    render_edit_polygon_overlay,
+    render_yolo_edit_polygon_overlay,
     render_yolo_polygon_overlay,
     save_interactive_results,
+    yolo_edit_polygons_to_mask,
 )
 from utils.hough_preprocess import (
     HoughPreprocessResult,
@@ -504,17 +504,17 @@ class PySideSamWindow(QMainWindow):
         clear_objects.clicked.connect(self.clear_saved_objects)
         layout.addWidget(clear_objects)
 
-        layout.addWidget(self.section("Polygon Edit"))
-        self.polygon_edit_check = QCheckBox("Edit polygons")
+        layout.addWidget(self.section("YOLO Polygon Edit"))
+        self.polygon_edit_check = QCheckBox("Edit YOLO polygons")
         self.polygon_edit_check.toggled.connect(self.set_polygon_edit_enabled)
         layout.addWidget(self.polygon_edit_check)
 
         self.draft_polygon_combo = QComboBox()
-        self.draft_polygon_combo.addItem("Add region", "add")
-        self.draft_polygon_combo.addItem("Cut hole", "subtract")
+        self.draft_polygon_combo.addItem("Add YOLO polygon", "add")
+        self.draft_polygon_combo.addItem("Cut mask hole", "subtract")
         layout.addWidget(self.draft_polygon_combo)
 
-        new_polygon = QPushButton("New Polygon")
+        new_polygon = QPushButton("New YOLO Polygon")
         new_polygon.clicked.connect(self.start_draft_polygon)
         layout.addWidget(new_polygon)
 
@@ -1083,7 +1083,7 @@ class PySideSamWindow(QMainWindow):
             color=color_for_index(object_id),
             score=self.current_score,
             class_id=int(self.class_spin.value()),
-            edit_polygons=mask_to_edit_polygons(
+            yolo_polygons=mask_to_yolo_edit_polygons(
                 self.current_mask,
                 epsilon=float(self.yolo_epsilon_spin.value()),
                 min_area=float(self.yolo_min_area_spin.value()),
@@ -1142,7 +1142,7 @@ class PySideSamWindow(QMainWindow):
             self.draft_polygon_points.clear()
             self.draft_polygon_active = False
         self.render_canvas()
-        self.set_status("Polygon edit mode" if enabled else "Point mode")
+        self.set_status("YOLO polygon edit mode" if enabled else "Point mode")
 
     def polygon_hit_threshold(self) -> float:
         transform = self.canvas.transform()
@@ -1173,7 +1173,7 @@ class PySideSamWindow(QMainWindow):
             return None
         threshold = self.polygon_hit_threshold()
         best: tuple[float, int, int] | None = None
-        for polygon_index, item in enumerate(self.saved_objects[object_index].edit_polygons):
+        for polygon_index, item in enumerate(self.saved_objects[object_index].yolo_polygons):
             points = item.get("points", [])
             for vertex_index, point in enumerate(points):  # type: ignore[assignment]
                 px, py = point
@@ -1190,7 +1190,7 @@ class PySideSamWindow(QMainWindow):
             return None
         threshold = self.polygon_hit_threshold()
         best: tuple[float, int, int] | None = None
-        for polygon_index, item in enumerate(self.saved_objects[object_index].edit_polygons):
+        for polygon_index, item in enumerate(self.saved_objects[object_index].yolo_polygons):
             points = list(item.get("points", []))
             if len(points) < 3:
                 continue
@@ -1207,7 +1207,7 @@ class PySideSamWindow(QMainWindow):
         if self.image_np is None or not (0 <= object_index < len(self.saved_objects)):
             return
         saved = self.saved_objects[object_index]
-        saved.mask = edit_polygons_to_mask(saved.edit_polygons, self.image_np.shape)
+        saved.mask = yolo_edit_polygons_to_mask(saved.yolo_polygons, self.image_np.shape)
 
     def start_draft_polygon(self) -> None:
         if self.selected_object_index() < 0:
@@ -1227,10 +1227,10 @@ class PySideSamWindow(QMainWindow):
             self.set_status("Draft polygon needs at least 3 points")
             return
         mode = str(self.draft_polygon_combo.currentData() or "add")
-        self.saved_objects[object_index].edit_polygons.append(
+        self.saved_objects[object_index].yolo_polygons.append(
             {"mode": mode, "points": [(float(x), float(y)) for x, y in self.draft_polygon_points]}
         )
-        self.selected_polygon_index = len(self.saved_objects[object_index].edit_polygons) - 1
+        self.selected_polygon_index = len(self.saved_objects[object_index].yolo_polygons) - 1
         self.selected_vertex_index = -1
         self.draft_polygon_points.clear()
         self.draft_polygon_active = False
@@ -1251,7 +1251,7 @@ class PySideSamWindow(QMainWindow):
         if object_index < 0 or self.selected_polygon_index < 0:
             self.set_status("No polygon selected")
             return
-        polygons = self.saved_objects[object_index].edit_polygons
+        polygons = self.saved_objects[object_index].yolo_polygons
         if not (0 <= self.selected_polygon_index < len(polygons)):
             return
         del polygons[self.selected_polygon_index]
@@ -1282,7 +1282,7 @@ class PySideSamWindow(QMainWindow):
             hit = self.nearest_polygon_vertex(x, y)
             if hit is not None:
                 object_index, polygon_index, vertex_index = hit
-                points = self.saved_objects[object_index].edit_polygons[polygon_index].get("points", [])
+                points = self.saved_objects[object_index].yolo_polygons[polygon_index].get("points", [])
                 if len(points) > 3:
                     del points[vertex_index]  # type: ignore[index]
                     self.selected_polygon_index = polygon_index
@@ -1301,7 +1301,7 @@ class PySideSamWindow(QMainWindow):
                 edge = self.nearest_polygon_edge(x, y)
                 if edge is not None:
                     object_index, polygon_index, insert_index = edge
-                    points = self.saved_objects[object_index].edit_polygons[polygon_index].get("points", [])
+                    points = self.saved_objects[object_index].yolo_polygons[polygon_index].get("points", [])
                     points.insert(insert_index, (x, y))  # type: ignore[attr-defined]
                     self.selected_polygon_index = polygon_index
                     self.selected_vertex_index = insert_index
@@ -1335,7 +1335,7 @@ class PySideSamWindow(QMainWindow):
 
         if event_type == "move" and self.edit_drag_target is not None:
             object_index, polygon_index, vertex_index = self.edit_drag_target
-            points = self.saved_objects[object_index].edit_polygons[polygon_index].get("points", [])
+            points = self.saved_objects[object_index].yolo_polygons[polygon_index].get("points", [])
             if 0 <= vertex_index < len(points):
                 points[vertex_index] = (x, y)  # type: ignore[index]
                 self.rebuild_object_mask_from_polygons(object_index)
@@ -1358,7 +1358,7 @@ class PySideSamWindow(QMainWindow):
             self.objects_list.clear()
             for index, saved in enumerate(self.saved_objects, start=1):
                 area = int(saved.mask.astype(bool).sum())
-                polygon_count = len(saved.edit_polygons)
+                polygon_count = len(saved.yolo_polygons)
                 self.objects_list.addItem(
                     f"{index}. class={saved.class_id}  area={area}  polygons={polygon_count}  score={saved.score:.3f}"
                 )
@@ -1428,7 +1428,7 @@ class PySideSamWindow(QMainWindow):
                 self.current_mask,
                 self.current_color,
             )
-            overlay = render_edit_polygon_overlay(
+            overlay = render_yolo_edit_polygon_overlay(
                 overlay,
                 self.saved_objects,
                 selected_object_index=self.selected_object_index(),
@@ -1437,8 +1437,8 @@ class PySideSamWindow(QMainWindow):
                 draft_polygon=self.draft_polygon_points,
                 draft_mode=str(self.draft_polygon_combo.currentData() or "add"),
             )
-            total_polygons = sum(len(saved.edit_polygons) for saved in self.saved_objects)
-            self.yolo_preview_label.setText(f"Edit polygons: {total_polygons}")
+            total_polygons = sum(len(saved.yolo_polygons) for saved in self.saved_objects)
+            self.yolo_preview_label.setText(f"Editable YOLO polygons: {total_polygons}")
         elif self.yolo_preview_check.isChecked():
             overlay, polygon_count = render_yolo_polygon_overlay(
                 self.image_np,
