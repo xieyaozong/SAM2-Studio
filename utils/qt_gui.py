@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSplitter,
+    QTabWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -264,23 +265,15 @@ class PySideSamWindow(QMainWindow):
 
         left = self.make_panel()
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(12, 12, 12, 12)
-        left_layout.setSpacing(10)
+        left_layout.setContentsMargins(10, 10, 10, 10)
+        left_layout.setSpacing(8)
         splitter.addWidget(left)
 
-        control_scroll = QScrollArea()
-        control_scroll.setWidgetResizable(True)
-        control_scroll.setFrameShape(QFrame.NoFrame)
-        control_scroll.setObjectName("controlScroll")
-        control_body = QWidget()
-        control_body.setObjectName("scrollBody")
-        control_layout = QVBoxLayout(control_body)
-        control_layout.setContentsMargins(4, 4, 4, 4)
-        control_layout.setSpacing(10)
-        control_scroll.setWidget(control_body)
-        left_layout.addWidget(control_scroll, 1)
-
-        self.populate_left_controls(control_layout)
+        self.left_tabs = QTabWidget()
+        self.left_tabs.setObjectName("sideTabs")
+        self.left_tabs.setDocumentMode(True)
+        left_layout.addWidget(self.left_tabs, 1)
+        self.populate_left_controls(self.left_tabs)
 
         self.save_button = QPushButton("Save Current")
         self.save_button.setObjectName("primarySaveButton")
@@ -299,25 +292,61 @@ class PySideSamWindow(QMainWindow):
 
         right = self.make_panel()
         right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(16, 16, 16, 16)
-        right_layout.setSpacing(10)
+        right_layout.setContentsMargins(10, 10, 10, 10)
+        right_layout.setSpacing(8)
         splitter.addWidget(right)
-        self.populate_right_controls(right_layout)
+        self.right_tabs = QTabWidget()
+        self.right_tabs.setObjectName("sideTabs")
+        self.right_tabs.setDocumentMode(True)
+        right_layout.addWidget(self.right_tabs, 1)
+        self.populate_right_controls(self.right_tabs)
 
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
-        splitter.setSizes([260, 760, 260])
+        splitter.setSizes([300, 680, 300])
 
-    def populate_left_controls(self, layout: QVBoxLayout) -> None:
+    def make_tab_layout(self, tabs: QTabWidget, title: str, *, scroll: bool = True) -> QVBoxLayout:
+        if scroll:
+            scroll_area = QScrollArea()
+            scroll_area.setWidgetResizable(True)
+            scroll_area.setFrameShape(QFrame.NoFrame)
+            scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            scroll_area.setObjectName("controlScroll")
+            body = QWidget()
+            body.setObjectName("scrollBody")
+            layout = QVBoxLayout(body)
+            layout.setContentsMargins(4, 4, 4, 4)
+            layout.setSpacing(8)
+            scroll_area.setWidget(body)
+            tabs.addTab(scroll_area, title)
+            return layout
+
+        page = QWidget()
+        page.setObjectName("scrollBody")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(8)
+        tabs.addTab(page, title)
+        return layout
+
+    @staticmethod
+    def add_button_row(layout: QVBoxLayout, *buttons: QPushButton) -> None:
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        for button in buttons:
+            row.addWidget(button)
+        layout.addLayout(row)
+
+    def populate_left_controls(self, tabs: QTabWidget) -> None:
+        layout = self.make_tab_layout(tabs, "Annotate")
         layout.addWidget(self.section("File"))
         open_image_button = QPushButton("Open Image")
         open_image_button.clicked.connect(self.open_image)
-        layout.addWidget(open_image_button)
 
         open_folder_button = QPushButton("Open Folder")
         open_folder_button.clicked.connect(self.open_folder)
-        layout.addWidget(open_folder_button)
+        self.add_button_row(layout, open_image_button, open_folder_button)
 
         output_button = QPushButton("Output Folder")
         output_button.clicked.connect(self.choose_output_folder)
@@ -327,7 +356,67 @@ class PySideSamWindow(QMainWindow):
         self.folder_recursive_check.setChecked(True)
         layout.addWidget(self.folder_recursive_check)
 
-        layout.addWidget(self.section("Preprocess"))
+        self.image_counter_label = QLabel("No image loaded")
+        self.image_counter_label.setObjectName("muted")
+        layout.addWidget(self.image_counter_label)
+
+        nav_row = QHBoxLayout()
+        nav_row.setSpacing(6)
+        prev_button = QPushButton("Prev")
+        prev_button.clicked.connect(self.previous_image)
+        next_button = QPushButton("Next")
+        next_button.clicked.connect(self.next_image)
+        nav_row.addWidget(prev_button)
+        nav_row.addWidget(next_button)
+        layout.addLayout(nav_row)
+
+        self.output_label = QLabel("Output: not selected")
+        self.output_label.setObjectName("muted")
+        self.output_label.setWordWrap(True)
+        layout.addWidget(self.output_label)
+
+        layout.addWidget(self.section("Point Mode"))
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(6)
+        self.add_button = QPushButton("Add")
+        self.add_button.setCheckable(True)
+        self.add_button.setChecked(True)
+        self.add_button.setProperty("accent", True)
+        self.remove_button = QPushButton("Remove")
+        self.remove_button.setCheckable(True)
+        self.remove_button.setProperty("danger", True)
+        mode_group = QButtonGroup(self)
+        mode_group.addButton(self.add_button)
+        mode_group.addButton(self.remove_button)
+        self.add_button.clicked.connect(lambda: self.set_status("Foreground point mode"))
+        self.remove_button.clicked.connect(lambda: self.set_status("Background point mode"))
+        mode_row.addWidget(self.add_button)
+        mode_row.addWidget(self.remove_button)
+        layout.addLayout(mode_row)
+
+        layout.addWidget(self.section("Mask Actions"))
+        self.accept_button = QPushButton("Accept Mask")
+        self.accept_button.setProperty("accent", True)
+        self.accept_button.clicked.connect(self.accept_current_mask)
+        layout.addWidget(self.accept_button)
+
+        undo_button = QPushButton("Undo Point")
+        undo_button.clicked.connect(self.undo_point)
+        clear_button = QPushButton("Clear Points")
+        clear_button.clicked.connect(self.clear_points)
+        self.add_button_row(layout, undo_button, clear_button)
+
+        layout.addWidget(self.section("View"))
+        zoom_out = QPushButton("-")
+        zoom_out.clicked.connect(lambda: self.canvas.scale(1 / 1.18, 1 / 1.18))
+        fit = QPushButton("Fit")
+        fit.clicked.connect(self.canvas_fit)
+        zoom_in = QPushButton("+")
+        zoom_in.clicked.connect(lambda: self.canvas.scale(1.18, 1.18))
+        self.add_button_row(layout, zoom_out, fit, zoom_in)
+        layout.addStretch(1)
+
+        layout = self.make_tab_layout(tabs, "Preprocess")
         self.hough_image_combo = QComboBox()
         self.hough_image_combo.addItem("Full masked image", "full")
         self.hough_image_combo.addItem("Center crop", "crop")
@@ -366,57 +455,21 @@ class PySideSamWindow(QMainWindow):
 
         preview_hough_button = QPushButton("Preview Hough")
         preview_hough_button.clicked.connect(self.preview_hough_preprocess)
-        layout.addWidget(preview_hough_button)
 
         use_hough_button = QPushButton("Use Hough For SAM")
         use_hough_button.setProperty("accent", True)
         use_hough_button.clicked.connect(self.apply_hough_to_sam)
-        layout.addWidget(use_hough_button)
+        self.add_button_row(layout, preview_hough_button, use_hough_button)
 
         save_hough_button = QPushButton("Save Hough Result")
         save_hough_button.clicked.connect(self.save_hough_result)
-        layout.addWidget(save_hough_button)
 
         restore_original_button = QPushButton("Restore Original")
         restore_original_button.clicked.connect(self.restore_original_image)
-        layout.addWidget(restore_original_button)
+        self.add_button_row(layout, save_hough_button, restore_original_button)
+        layout.addStretch(1)
 
-        self.image_counter_label = QLabel("No image loaded")
-        self.image_counter_label.setObjectName("muted")
-        layout.addWidget(self.image_counter_label)
-
-        nav_row = QHBoxLayout()
-        prev_button = QPushButton("Prev")
-        prev_button.clicked.connect(self.previous_image)
-        next_button = QPushButton("Next")
-        next_button.clicked.connect(self.next_image)
-        nav_row.addWidget(prev_button)
-        nav_row.addWidget(next_button)
-        layout.addLayout(nav_row)
-
-        self.output_label = QLabel("Output: not selected")
-        self.output_label.setObjectName("muted")
-        self.output_label.setWordWrap(True)
-        layout.addWidget(self.output_label)
-
-        layout.addWidget(self.section("Point Mode"))
-        mode_row = QHBoxLayout()
-        self.add_button = QPushButton("Add")
-        self.add_button.setCheckable(True)
-        self.add_button.setChecked(True)
-        self.add_button.setProperty("accent", True)
-        self.remove_button = QPushButton("Remove")
-        self.remove_button.setCheckable(True)
-        self.remove_button.setProperty("danger", True)
-        mode_group = QButtonGroup(self)
-        mode_group.addButton(self.add_button)
-        mode_group.addButton(self.remove_button)
-        self.add_button.clicked.connect(lambda: self.set_status("Foreground point mode"))
-        self.remove_button.clicked.connect(lambda: self.set_status("Background point mode"))
-        mode_row.addWidget(self.add_button)
-        mode_row.addWidget(self.remove_button)
-        layout.addLayout(mode_row)
-
+        layout = self.make_tab_layout(tabs, "Export")
         layout.addWidget(self.section("Class And Export"))
         self.class_spin = QSpinBox()
         self.class_spin.setRange(0, 9999)
@@ -458,36 +511,10 @@ class PySideSamWindow(QMainWindow):
         self.yolo_preview_label = QLabel("YOLO polygons: off")
         self.yolo_preview_label.setObjectName("muted")
         layout.addWidget(self.yolo_preview_label)
-
-        layout.addWidget(self.section("Mask Actions"))
-        self.accept_button = QPushButton("Accept Mask")
-        self.accept_button.setProperty("accent", True)
-        self.accept_button.clicked.connect(self.accept_current_mask)
-        layout.addWidget(self.accept_button)
-
-        undo_button = QPushButton("Undo Point")
-        undo_button.clicked.connect(self.undo_point)
-        layout.addWidget(undo_button)
-
-        clear_button = QPushButton("Clear Points")
-        clear_button.clicked.connect(self.clear_points)
-        layout.addWidget(clear_button)
-
-        layout.addWidget(self.section("View"))
-        view_row = QHBoxLayout()
-        zoom_out = QPushButton("-")
-        zoom_out.clicked.connect(lambda: self.canvas.scale(1 / 1.18, 1 / 1.18))
-        fit = QPushButton("Fit")
-        fit.clicked.connect(self.canvas_fit)
-        zoom_in = QPushButton("+")
-        zoom_in.clicked.connect(lambda: self.canvas.scale(1.18, 1.18))
-        view_row.addWidget(zoom_out)
-        view_row.addWidget(fit)
-        view_row.addWidget(zoom_in)
-        layout.addLayout(view_row)
         layout.addStretch(1)
 
-    def populate_right_controls(self, layout: QVBoxLayout) -> None:
+    def populate_right_controls(self, tabs: QTabWidget) -> None:
+        layout = self.make_tab_layout(tabs, "Objects", scroll=False)
         layout.addWidget(self.section("Objects"))
         self.object_count = QLabel("0 saved")
         self.object_count.setObjectName("muted")
@@ -499,13 +526,13 @@ class PySideSamWindow(QMainWindow):
         remove_object = QPushButton("Remove Selected")
         remove_object.setProperty("danger", True)
         remove_object.clicked.connect(self.remove_selected_object)
-        layout.addWidget(remove_object)
 
         clear_objects = QPushButton("Clear Objects")
         clear_objects.setProperty("danger", True)
         clear_objects.clicked.connect(self.clear_saved_objects)
-        layout.addWidget(clear_objects)
+        self.add_button_row(layout, remove_object, clear_objects)
 
+        layout = self.make_tab_layout(tabs, "Polygon")
         layout.addWidget(self.section("YOLO Polygon Edit"))
         self.polygon_edit_check = QCheckBox("Edit YOLO polygons")
         self.polygon_edit_check.toggled.connect(self.set_polygon_edit_enabled)
@@ -518,26 +545,26 @@ class PySideSamWindow(QMainWindow):
 
         new_polygon = QPushButton("New YOLO Polygon")
         new_polygon.clicked.connect(self.start_draft_polygon)
-        layout.addWidget(new_polygon)
 
         finish_polygon = QPushButton("Finish Polygon")
         finish_polygon.clicked.connect(self.finish_draft_polygon)
-        layout.addWidget(finish_polygon)
 
         cancel_polygon = QPushButton("Cancel Polygon")
         cancel_polygon.clicked.connect(self.cancel_draft_polygon)
+        self.add_button_row(layout, new_polygon, finish_polygon)
         layout.addWidget(cancel_polygon)
 
         delete_vertex = QPushButton("Delete Selected Vertex")
         delete_vertex.setProperty("danger", True)
         delete_vertex.clicked.connect(self.delete_selected_vertex)
         layout.addWidget(delete_vertex)
+        layout.addStretch(1)
 
     def make_panel(self) -> QFrame:
         frame = QFrame()
         frame.setObjectName("panel")
-        frame.setMinimumWidth(190)
-        frame.setMaximumWidth(340)
+        frame.setMinimumWidth(240)
+        frame.setMaximumWidth(420)
         frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         return frame
 
@@ -1573,6 +1600,28 @@ def apply_style(app: QApplication) -> None:
             border-bottom: 1px solid #d9e1ec;
         }
         QSplitter::handle { background: #d9e1ec; margin: 2px; }
+        QTabWidget#sideTabs::pane {
+            border: 0;
+            top: -1px;
+            background: #ffffff;
+        }
+        QTabWidget#sideTabs QTabBar::tab {
+            background: #eef3f8;
+            border: 1px solid #d9e1ec;
+            border-bottom: 0;
+            border-top-left-radius: 6px;
+            border-top-right-radius: 6px;
+            color: #475569;
+            font-weight: 700;
+            padding: 7px 9px;
+            margin-right: 3px;
+        }
+        QTabWidget#sideTabs QTabBar::tab:selected {
+            background: #ffffff;
+            color: #0f766e;
+            border-color: #cbd7e6;
+        }
+        QTabWidget#sideTabs QTabBar::tab:hover { background: #e2eaf3; }
         QScrollArea#controlScroll, QWidget#scrollBody { background: #ffffff; border: 0; }
         QScrollBar:vertical { background: #f1f5f9; width: 10px; margin: 0; }
         QScrollBar::handle:vertical {
