@@ -9,6 +9,8 @@
 
 Windows desktop app for interactive image segmentation with Meta's Segment Anything Model 2. SAM2 is installed from Meta's upstream repository instead of being vendored here.
 
+Maintainer: xieyaozong1124 <xieyaozong1124@gmail.com>
+
 ![Workflow](assets/workflow.png)
 
 ## What It Does
@@ -25,7 +27,7 @@ Windows desktop app for interactive image segmentation with Meta's Segment Anyth
 
 ![Interface layout](assets/interface.png)
 
-The app centers on an image canvas with foreground/background clicks and the predicted mask overlay, plus a sidebar for model, preprocessing, and export settings.
+The app centers on an image canvas with foreground/background clicks and the predicted mask overlay. Side tabs keep annotation, preprocessing, export, object review, and YOLO polygon editing tools separated.
 
 ## Layout
 
