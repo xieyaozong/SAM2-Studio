@@ -15,7 +15,7 @@ Windows desktop app for interactive image segmentation with Meta's Segment Anyth
 
 - Opens a single image or steps through a folder.
 - Adds foreground and background clicks to guide SAM2.
-- Adjusts accepted YOLO polygons and reflects them back into the saved mask without rerunning SAM2.
+- Adjusts YOLO polygons generated from the active SAM2 mask and reflects them back into the saved mask without rerunning SAM2.
 - Applies optional Hough or foreground preprocessing before annotation.
 - Uses the full masked image or an adaptive center crop.
 - Exports YOLO segmentation labels, mask images, Mask R-CNN COCO/RLE annotations, overlays, and object metadata.

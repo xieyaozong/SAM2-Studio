@@ -133,6 +133,7 @@ def render_yolo_polygon_overlay(
     current_mask: np.ndarray | None = None,
     current_color: np.ndarray | None = None,
     current_class_id: int = 0,
+    current_yolo_polygons: Sequence[dict[str, object]] | None = None,
     epsilon: float = 2.0,
     min_area: float = 8.0,
     fill_alpha: float = 0.18,
@@ -145,7 +146,14 @@ def render_yolo_polygon_overlay(
     ]
     if current_mask is not None:
         color = current_color if current_color is not None else np.array([56, 217, 197], dtype=np.uint8)
-        items.append((mask_to_polygons(current_mask.astype(bool), epsilon=epsilon, min_area=min_area), color, int(current_class_id)))
+        current_polygons = [
+            [(float(x), float(y)) for x, y in item["points"]]  # type: ignore[index]
+            for item in normalize_yolo_edit_polygons(current_yolo_polygons)
+            if item["mode"] == "add"
+        ]
+        if not current_polygons:
+            current_polygons = mask_to_polygons(current_mask.astype(bool), epsilon=epsilon, min_area=min_area)
+        items.append((current_polygons, color, int(current_class_id)))
 
     polygon_count = 0
     for polygons, color, class_id in items:
@@ -204,20 +212,28 @@ def render_yolo_polygon_overlay(
 def render_yolo_edit_polygon_overlay(
     image: np.ndarray,
     saved_objects: Sequence[SavedObject],
-    selected_object_index: int = -1,
+    selected_object_index: int = -2,
     selected_polygon_index: int = -1,
     selected_vertex_index: int = -1,
     draft_polygon: Sequence[tuple[float, float]] | None = None,
     draft_mode: str = "add",
+    current_yolo_polygons: Sequence[dict[str, object]] | None = None,
+    current_color: np.ndarray | None = None,
 ) -> np.ndarray:
     overlay = image.copy()
     if cv2 is None:
         return overlay
 
+    items: list[tuple[int, np.ndarray, Sequence[dict[str, object]]]] = []
+    if current_yolo_polygons is not None:
+        color = current_color if current_color is not None else np.array([56, 217, 197], dtype=np.uint8)
+        items.append((-1, color.astype(np.uint8), current_yolo_polygons))
     for object_index, saved in enumerate(saved_objects):
-        color = saved.color.astype(np.uint8)
+        items.append((object_index, saved.color.astype(np.uint8), saved.yolo_polygons))
+
+    for object_index, color, polygons in items:
         selected_object = object_index == selected_object_index
-        for polygon_index, item in enumerate(normalize_yolo_edit_polygons(saved.yolo_polygons)):
+        for polygon_index, item in enumerate(normalize_yolo_edit_polygons(polygons)):
             points = np.rint(np.asarray(item["points"], dtype=np.float32)).astype(np.int32)
             if len(points) < 2:
                 continue

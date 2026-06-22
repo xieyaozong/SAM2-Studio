@@ -201,6 +201,8 @@ class PySideSamWindow(QMainWindow):
         self.current_mask: np.ndarray | None = None
         self.current_score = 0.0
         self.current_color = np.array([56, 217, 197], dtype=np.uint8)
+        self.current_yolo_polygons: list[dict[str, object]] = []
+        self.current_yolo_dirty = False
         self.saved_objects: list[SavedObject] = []
         self.points: list[tuple[float, float, int]] = []
         self.image_files: list[Path] = []
@@ -441,7 +443,7 @@ class PySideSamWindow(QMainWindow):
         self.yolo_epsilon_spin.setDecimals(1)
         self.yolo_epsilon_spin.setValue(2.0)
         self.yolo_epsilon_spin.setPrefix("epsilon ")
-        self.yolo_epsilon_spin.valueChanged.connect(lambda _value: self.render_canvas())
+        self.yolo_epsilon_spin.valueChanged.connect(self.on_yolo_polygon_settings_changed)
         layout.addWidget(self.yolo_epsilon_spin)
 
         self.yolo_min_area_spin = QDoubleSpinBox()
@@ -450,7 +452,7 @@ class PySideSamWindow(QMainWindow):
         self.yolo_min_area_spin.setDecimals(1)
         self.yolo_min_area_spin.setValue(8.0)
         self.yolo_min_area_spin.setPrefix("min area ")
-        self.yolo_min_area_spin.valueChanged.connect(lambda _value: self.render_canvas())
+        self.yolo_min_area_spin.valueChanged.connect(self.on_yolo_polygon_settings_changed)
         layout.addWidget(self.yolo_min_area_spin)
 
         self.yolo_preview_label = QLabel("YOLO polygons: off")
@@ -565,6 +567,8 @@ class PySideSamWindow(QMainWindow):
         self.model_key = None
         self.image_ready = False
         self.current_mask = None
+        self.current_yolo_polygons.clear()
+        self.current_yolo_dirty = False
         self.points.clear()
         self.point_version += 1
         self.render_canvas()
@@ -608,6 +612,8 @@ class PySideSamWindow(QMainWindow):
         self.saved_objects.clear()
         self.current_mask = None
         self.current_score = 0.0
+        self.current_yolo_polygons.clear()
+        self.current_yolo_dirty = False
         self.edit_drag_target = None
         self.selected_polygon_index = -1
         self.selected_vertex_index = -1
@@ -952,6 +958,17 @@ class PySideSamWindow(QMainWindow):
                     if version == self.point_version:
                         self.current_mask = mask
                         self.current_score = score
+                        self.current_yolo_polygons = mask_to_yolo_edit_polygons(
+                            mask,
+                            epsilon=float(self.yolo_epsilon_spin.value()),
+                            min_area=float(self.yolo_min_area_spin.value()),
+                        )
+                        self.current_yolo_dirty = False
+                        self.edit_drag_target = None
+                        self.selected_polygon_index = -1
+                        self.selected_vertex_index = -1
+                        self.draft_polygon_points.clear()
+                        self.draft_polygon_active = False
                         self.set_status(f"Mask score {score:.3f}")
                         self.render_canvas()
                     if self.pending_prediction or version != self.point_version:
@@ -1014,10 +1031,14 @@ class PySideSamWindow(QMainWindow):
             return
         if not self.points:
             self.current_mask = None
+            self.current_yolo_polygons.clear()
+            self.current_yolo_dirty = False
             self.render_canvas()
             return
         if not any(label == 1 for _x, _y, label in self.points):
             self.current_mask = None
+            self.current_yolo_polygons.clear()
+            self.current_yolo_dirty = False
             self.set_status("Add at least one foreground point")
             self.render_canvas()
             return
@@ -1057,6 +1078,8 @@ class PySideSamWindow(QMainWindow):
         self.point_version += 1
         if not self.points:
             self.current_mask = None
+            self.current_yolo_polygons.clear()
+            self.current_yolo_dirty = False
             self.render_canvas()
             self.set_status("Point removed")
             return
@@ -1067,6 +1090,8 @@ class PySideSamWindow(QMainWindow):
         self.points.clear()
         self.current_mask = None
         self.current_score = 0.0
+        self.current_yolo_polygons.clear()
+        self.current_yolo_dirty = False
         self.point_version += 1
         self.pending_prediction = False
         self.render_canvas()
@@ -1076,6 +1101,11 @@ class PySideSamWindow(QMainWindow):
         if self.current_mask is None:
             self.set_status("No active mask")
             return
+        yolo_polygons = self.current_yolo_polygons or mask_to_yolo_edit_polygons(
+            self.current_mask,
+            epsilon=float(self.yolo_epsilon_spin.value()),
+            min_area=float(self.yolo_min_area_spin.value()),
+        )
         object_id = len(self.saved_objects) + 1
         saved = SavedObject(
             name=f"Object {object_id}",
@@ -1083,11 +1113,7 @@ class PySideSamWindow(QMainWindow):
             color=color_for_index(object_id),
             score=self.current_score,
             class_id=int(self.class_spin.value()),
-            yolo_polygons=mask_to_yolo_edit_polygons(
-                self.current_mask,
-                epsilon=float(self.yolo_epsilon_spin.value()),
-                min_area=float(self.yolo_min_area_spin.value()),
-            ),
+            yolo_polygons=[{"mode": item["mode"], "points": list(item["points"])} for item in yolo_polygons],
         )
         self.saved_objects.append(saved)
         self.clear_points()
@@ -1133,9 +1159,43 @@ class PySideSamWindow(QMainWindow):
         row = self.objects_list.currentRow()
         return row if 0 <= row < len(self.saved_objects) else -1
 
+    def active_polygon_target_index(self) -> int | None:
+        if self.current_mask is not None:
+            return -1
+        object_index = self.selected_object_index()
+        return object_index if object_index >= 0 else None
+
+    def polygons_for_target(self, target_index: int) -> list[dict[str, object]]:
+        if target_index == -1:
+            return self.current_yolo_polygons
+        return self.saved_objects[target_index].yolo_polygons
+
+    def rebuild_target_mask_from_polygons(self, target_index: int) -> None:
+        if self.image_np is None:
+            return
+        if target_index == -1:
+            self.current_mask = yolo_edit_polygons_to_mask(self.current_yolo_polygons, self.image_np.shape)
+            self.current_yolo_dirty = True
+            return
+        if 0 <= target_index < len(self.saved_objects):
+            saved = self.saved_objects[target_index]
+            saved.mask = yolo_edit_polygons_to_mask(saved.yolo_polygons, self.image_np.shape)
+            self.dirty = True
+
+    def on_yolo_polygon_settings_changed(self, _value) -> None:
+        if self.current_mask is not None and not self.current_yolo_dirty:
+            self.current_yolo_polygons = mask_to_yolo_edit_polygons(
+                self.current_mask,
+                epsilon=float(self.yolo_epsilon_spin.value()),
+                min_area=float(self.yolo_min_area_spin.value()),
+            )
+            self.selected_polygon_index = -1
+            self.selected_vertex_index = -1
+        self.render_canvas()
+
     def set_polygon_edit_enabled(self, enabled: bool) -> None:
         self.canvas.set_edit_mode(enabled)
-        if enabled and self.selected_object_index() < 0 and self.saved_objects:
+        if enabled and self.current_mask is None and self.selected_object_index() < 0 and self.saved_objects:
             self.objects_list.setCurrentRow(0)
         if not enabled:
             self.edit_drag_target = None
@@ -1168,12 +1228,12 @@ class PySideSamWindow(QMainWindow):
         return float(np.hypot(px - proj_x, py - proj_y))
 
     def nearest_polygon_vertex(self, x: float, y: float) -> tuple[int, int, int] | None:
-        object_index = self.selected_object_index()
-        if object_index < 0:
+        target_index = self.active_polygon_target_index()
+        if target_index is None:
             return None
         threshold = self.polygon_hit_threshold()
         best: tuple[float, int, int] | None = None
-        for polygon_index, item in enumerate(self.saved_objects[object_index].yolo_polygons):
+        for polygon_index, item in enumerate(self.polygons_for_target(target_index)):
             points = item.get("points", [])
             for vertex_index, point in enumerate(points):  # type: ignore[assignment]
                 px, py = point
@@ -1182,15 +1242,15 @@ class PySideSamWindow(QMainWindow):
                     best = (distance, polygon_index, vertex_index)
         if best is None:
             return None
-        return object_index, best[1], best[2]
+        return target_index, best[1], best[2]
 
     def nearest_polygon_edge(self, x: float, y: float) -> tuple[int, int, int] | None:
-        object_index = self.selected_object_index()
-        if object_index < 0:
+        target_index = self.active_polygon_target_index()
+        if target_index is None:
             return None
         threshold = self.polygon_hit_threshold()
         best: tuple[float, int, int] | None = None
-        for polygon_index, item in enumerate(self.saved_objects[object_index].yolo_polygons):
+        for polygon_index, item in enumerate(self.polygons_for_target(target_index)):
             points = list(item.get("points", []))
             if len(points) < 3:
                 continue
@@ -1201,17 +1261,14 @@ class PySideSamWindow(QMainWindow):
                     best = (distance, polygon_index, vertex_index + 1)
         if best is None:
             return None
-        return object_index, best[1], best[2]
+        return target_index, best[1], best[2]
 
     def rebuild_object_mask_from_polygons(self, object_index: int) -> None:
-        if self.image_np is None or not (0 <= object_index < len(self.saved_objects)):
-            return
-        saved = self.saved_objects[object_index]
-        saved.mask = yolo_edit_polygons_to_mask(saved.yolo_polygons, self.image_np.shape)
+        self.rebuild_target_mask_from_polygons(object_index)
 
     def start_draft_polygon(self) -> None:
-        if self.selected_object_index() < 0:
-            self.set_status("Select an object first")
+        if self.active_polygon_target_index() is None:
+            self.set_status("Create a SAM2 mask first or select an object")
             return
         self.polygon_edit_check.setChecked(True)
         self.draft_polygon_points.clear()
@@ -1220,22 +1277,22 @@ class PySideSamWindow(QMainWindow):
         self.render_canvas()
 
     def finish_draft_polygon(self) -> None:
-        object_index = self.selected_object_index()
-        if object_index < 0 or not self.draft_polygon_active:
+        target_index = self.active_polygon_target_index()
+        if target_index is None or not self.draft_polygon_active:
             return
         if len(self.draft_polygon_points) < 3:
             self.set_status("Draft polygon needs at least 3 points")
             return
         mode = str(self.draft_polygon_combo.currentData() or "add")
-        self.saved_objects[object_index].yolo_polygons.append(
+        polygons = self.polygons_for_target(target_index)
+        polygons.append(
             {"mode": mode, "points": [(float(x), float(y)) for x, y in self.draft_polygon_points]}
         )
-        self.selected_polygon_index = len(self.saved_objects[object_index].yolo_polygons) - 1
+        self.selected_polygon_index = len(polygons) - 1
         self.selected_vertex_index = -1
         self.draft_polygon_points.clear()
         self.draft_polygon_active = False
-        self.rebuild_object_mask_from_polygons(object_index)
-        self.dirty = True
+        self.rebuild_target_mask_from_polygons(target_index)
         self.update_object_list()
         self.render_canvas()
         self.set_status("Polygon added")
@@ -1247,27 +1304,26 @@ class PySideSamWindow(QMainWindow):
         self.set_status("Draft polygon canceled")
 
     def delete_selected_polygon(self) -> None:
-        object_index = self.selected_object_index()
-        if object_index < 0 or self.selected_polygon_index < 0:
+        target_index = self.active_polygon_target_index()
+        if target_index is None or self.selected_polygon_index < 0:
             self.set_status("No polygon selected")
             return
-        polygons = self.saved_objects[object_index].yolo_polygons
+        polygons = self.polygons_for_target(target_index)
         if not (0 <= self.selected_polygon_index < len(polygons)):
             return
         del polygons[self.selected_polygon_index]
         self.selected_polygon_index = -1
         self.selected_vertex_index = -1
-        self.rebuild_object_mask_from_polygons(object_index)
-        self.dirty = True
+        self.rebuild_target_mask_from_polygons(target_index)
         self.update_object_list()
         self.render_canvas()
         self.set_status("Polygon deleted")
 
     def handle_polygon_edit_event(self, event_type, x: float, y: float, button, modifiers) -> None:
-        if self.image_np is None or self.selected_object_index() < 0:
-            self.set_status("Select an object first")
+        target_index = self.active_polygon_target_index()
+        if self.image_np is None or target_index is None:
+            self.set_status("Create a SAM2 mask first or select an object")
             return
-        object_index = self.selected_object_index()
         if self.draft_polygon_active:
             if event_type == "press" and button == Qt.LeftButton:
                 self.draft_polygon_points.append((x, y))
@@ -1281,14 +1337,13 @@ class PySideSamWindow(QMainWindow):
         if event_type == "press" and button == Qt.RightButton:
             hit = self.nearest_polygon_vertex(x, y)
             if hit is not None:
-                object_index, polygon_index, vertex_index = hit
-                points = self.saved_objects[object_index].yolo_polygons[polygon_index].get("points", [])
+                target_index, polygon_index, vertex_index = hit
+                points = self.polygons_for_target(target_index)[polygon_index].get("points", [])
                 if len(points) > 3:
                     del points[vertex_index]  # type: ignore[index]
                     self.selected_polygon_index = polygon_index
                     self.selected_vertex_index = -1
-                    self.rebuild_object_mask_from_polygons(object_index)
-                    self.dirty = True
+                    self.rebuild_target_mask_from_polygons(target_index)
                     self.update_object_list()
                     self.render_canvas()
                     self.set_status("Vertex deleted")
@@ -1300,14 +1355,13 @@ class PySideSamWindow(QMainWindow):
             if modifiers & Qt.ShiftModifier:
                 edge = self.nearest_polygon_edge(x, y)
                 if edge is not None:
-                    object_index, polygon_index, insert_index = edge
-                    points = self.saved_objects[object_index].yolo_polygons[polygon_index].get("points", [])
+                    target_index, polygon_index, insert_index = edge
+                    points = self.polygons_for_target(target_index)[polygon_index].get("points", [])
                     points.insert(insert_index, (x, y))  # type: ignore[attr-defined]
                     self.selected_polygon_index = polygon_index
                     self.selected_vertex_index = insert_index
-                    self.edit_drag_target = (object_index, polygon_index, insert_index)
-                    self.rebuild_object_mask_from_polygons(object_index)
-                    self.dirty = True
+                    self.edit_drag_target = (target_index, polygon_index, insert_index)
+                    self.rebuild_target_mask_from_polygons(target_index)
                     self.update_object_list()
                     self.render_canvas()
                     self.set_status("Vertex inserted")
@@ -1334,19 +1388,18 @@ class PySideSamWindow(QMainWindow):
             return
 
         if event_type == "move" and self.edit_drag_target is not None:
-            object_index, polygon_index, vertex_index = self.edit_drag_target
-            points = self.saved_objects[object_index].yolo_polygons[polygon_index].get("points", [])
+            target_index, polygon_index, vertex_index = self.edit_drag_target
+            points = self.polygons_for_target(target_index)[polygon_index].get("points", [])
             if 0 <= vertex_index < len(points):
                 points[vertex_index] = (x, y)  # type: ignore[index]
-                self.rebuild_object_mask_from_polygons(object_index)
-                self.dirty = True
+                self.rebuild_target_mask_from_polygons(target_index)
                 self.render_canvas()
             return
 
         if event_type == "release":
             if self.edit_drag_target is not None:
-                object_index, _polygon_index, _vertex_index = self.edit_drag_target
-                self.rebuild_object_mask_from_polygons(object_index)
+                target_index, _polygon_index, _vertex_index = self.edit_drag_target
+                self.rebuild_target_mask_from_polygons(target_index)
                 self.update_object_list()
                 self.set_status("Polygon updated")
             self.edit_drag_target = None
@@ -1431,13 +1484,15 @@ class PySideSamWindow(QMainWindow):
             overlay = render_yolo_edit_polygon_overlay(
                 overlay,
                 self.saved_objects,
-                selected_object_index=self.selected_object_index(),
+                selected_object_index=self.active_polygon_target_index() if self.active_polygon_target_index() is not None else -2,
                 selected_polygon_index=self.selected_polygon_index,
                 selected_vertex_index=self.selected_vertex_index,
                 draft_polygon=self.draft_polygon_points,
                 draft_mode=str(self.draft_polygon_combo.currentData() or "add"),
+                current_yolo_polygons=self.current_yolo_polygons if self.current_mask is not None else None,
+                current_color=self.current_color,
             )
-            total_polygons = sum(len(saved.yolo_polygons) for saved in self.saved_objects)
+            total_polygons = len(self.current_yolo_polygons) + sum(len(saved.yolo_polygons) for saved in self.saved_objects)
             self.yolo_preview_label.setText(f"Editable YOLO polygons: {total_polygons}")
         elif self.yolo_preview_check.isChecked():
             overlay, polygon_count = render_yolo_polygon_overlay(
@@ -1446,6 +1501,7 @@ class PySideSamWindow(QMainWindow):
                 self.current_mask,
                 self.current_color,
                 current_class_id=int(self.class_spin.value()),
+                current_yolo_polygons=self.current_yolo_polygons,
                 epsilon=float(self.yolo_epsilon_spin.value()),
                 min_area=float(self.yolo_min_area_spin.value()),
             )
@@ -1458,7 +1514,8 @@ class PySideSamWindow(QMainWindow):
                 self.current_color,
             )
             self.yolo_preview_label.setText("YOLO polygons: off")
-        self.canvas.set_overlay(overlay, self.points)
+        show_prompt_points = not (hasattr(self, "polygon_edit_check") and self.polygon_edit_check.isChecked())
+        self.canvas.set_overlay(overlay, self.points if show_prompt_points else [])
         if fit:
             QTimer.singleShot(0, self.canvas.fit_image)
 
