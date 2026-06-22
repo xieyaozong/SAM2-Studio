@@ -42,6 +42,7 @@ if ($checkpointCount -eq 0) {
     --specpath build `
     --collect-submodules sam2 `
     --collect-data sam2 `
+    --collect-submodules pycocotools `
     --add-data $checkpointData `
     sam2_studio.py
 if ($LASTEXITCODE -ne 0) {
