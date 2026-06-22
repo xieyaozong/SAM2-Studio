@@ -9,8 +9,6 @@
 
 Windows desktop app for interactive image segmentation with Meta's Segment Anything Model 2. SAM2 is installed from Meta's upstream repository instead of being vendored here.
 
-Maintainer: xieyaozong1124 <xieyaozong1124@gmail.com>
-
 ![Workflow](assets/workflow.png)
 
 ## What It Does
