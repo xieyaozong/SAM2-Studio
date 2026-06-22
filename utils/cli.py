@@ -75,7 +75,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--export-format",
         choices=EXPORT_FORMATS,
         default="yolo",
-        help="Training label export format saved under labels/.",
+        help="Training label export format: yolo, mask, mask_rcnn, both, all, or none.",
     )
     parser.add_argument(
         "--no-yolo-labels",
@@ -103,7 +103,7 @@ def config_from_args(args: argparse.Namespace, parser: argparse.ArgumentParser) 
         parser.error("--output is required unless --gui or --batch-gui is used.")
 
     export_format = args.export_format
-    if args.no_yolo_labels and export_format in {"yolo", "both"}:
+    if args.no_yolo_labels and export_format in {"yolo", "both", "all"}:
         export_format = "mask"
 
     return SamBatchConfig(

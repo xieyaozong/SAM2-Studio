@@ -8,12 +8,14 @@ from utils.io_utils import (
     color_for_index,
     save_png,
     save_training_image,
+    wants_mask_rcnn_export,
     wants_mask_export,
     wants_yolo_export,
 )
 
 import csv
 import json
+import os
 
 import numpy as np
 
@@ -201,6 +203,64 @@ def render_yolo_polygon_overlay(
     return np.clip(overlay, 0, 255).astype(np.uint8), polygon_count
 
 
+def render_edit_polygon_overlay(
+    image: np.ndarray,
+    saved_objects: Sequence[SavedObject],
+    selected_object_index: int = -1,
+    selected_polygon_index: int = -1,
+    selected_vertex_index: int = -1,
+    draft_polygon: Sequence[tuple[float, float]] | None = None,
+    draft_mode: str = "add",
+) -> np.ndarray:
+    overlay = image.copy()
+    if cv2 is None:
+        return overlay
+
+    for object_index, saved in enumerate(saved_objects):
+        color = saved.color.astype(np.uint8)
+        selected_object = object_index == selected_object_index
+        for polygon_index, item in enumerate(normalize_edit_polygons(saved.edit_polygons)):
+            points = np.rint(np.asarray(item["points"], dtype=np.float32)).astype(np.int32)
+            if len(points) < 2:
+                continue
+            mode = item["mode"]
+            if mode == "subtract":
+                color_tuple = (255, 210, 80)
+            else:
+                color_tuple = tuple(int(value) for value in color.tolist())
+            thickness = 3 if selected_object and polygon_index == selected_polygon_index else 2
+            cv2.polylines(
+                overlay,
+                [points.reshape((-1, 1, 2))],
+                isClosed=True,
+                color=color_tuple,
+                thickness=thickness,
+                lineType=cv2.LINE_AA,
+            )
+            if selected_object:
+                for vertex_index, (x, y) in enumerate(points):
+                    radius = 6 if polygon_index == selected_polygon_index and vertex_index == selected_vertex_index else 4
+                    cv2.circle(overlay, (int(x), int(y)), radius, (255, 255, 255), -1, lineType=cv2.LINE_AA)
+                    cv2.circle(overlay, (int(x), int(y)), radius, color_tuple, 2, lineType=cv2.LINE_AA)
+
+    if draft_polygon:
+        points = np.rint(np.asarray(draft_polygon, dtype=np.float32)).astype(np.int32)
+        color_tuple = (255, 210, 80) if draft_mode == "subtract" else (56, 217, 197)
+        if len(points) >= 2:
+            cv2.polylines(
+                overlay,
+                [points.reshape((-1, 1, 2))],
+                isClosed=False,
+                color=color_tuple,
+                thickness=2,
+                lineType=cv2.LINE_AA,
+            )
+        for x, y in points:
+            cv2.circle(overlay, (int(x), int(y)), 5, (255, 255, 255), -1, lineType=cv2.LINE_AA)
+            cv2.circle(overlay, (int(x), int(y)), 5, color_tuple, 2, lineType=cv2.LINE_AA)
+    return overlay
+
+
 def build_color_mask(saved_objects: Sequence[SavedObject]) -> np.ndarray:
     if not saved_objects:
         return np.zeros((1, 1, 3), dtype=np.uint8)
@@ -227,6 +287,79 @@ def build_class_label_mask(
     return label_mask
 
 
+def normalize_edit_polygons(raw_polygons: Sequence[dict[str, object]] | None) -> list[dict[str, object]]:
+    polygons: list[dict[str, object]] = []
+    for item in raw_polygons or []:
+        mode = str(item.get("mode", "add"))
+        if mode not in {"add", "subtract"}:
+            mode = "add"
+        points = []
+        for raw_point in item.get("points", []):  # type: ignore[union-attr]
+            try:
+                x, y = raw_point  # type: ignore[misc]
+                points.append((float(x), float(y)))
+            except Exception:
+                continue
+        if len(points) >= 3:
+            polygons.append({"mode": mode, "points": points})
+    return polygons
+
+
+def mask_to_edit_polygons(mask: np.ndarray, epsilon: float = 2.0, min_area: float = 8.0) -> list[dict[str, object]]:
+    mask_u8 = np.asarray(mask, dtype=bool).astype(np.uint8) * 255
+    polygons: list[dict[str, object]] = []
+
+    if cv2 is not None:
+        contours, hierarchy = cv2.findContours(mask_u8, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+        if hierarchy is None:
+            return []
+        for index, contour in enumerate(contours):
+            area = float(cv2.contourArea(contour))
+            if area <= min_area:
+                continue
+            approx = cv2.approxPolyDP(contour, epsilon, True)
+            if len(approx) < 3:
+                continue
+            points = [(float(point[0][0]), float(point[0][1])) for point in approx]
+            mode = "add" if int(hierarchy[0][index][3]) == -1 else "subtract"
+            if polygon_area(points) < 0:
+                points.reverse()
+            polygons.append({"mode": mode, "points": points})
+        polygons.sort(key=lambda item: abs(polygon_area(item["points"])), reverse=True)  # type: ignore[arg-type]
+        return polygons
+
+    for polygon in mask_to_polygons(mask, epsilon=epsilon, min_area=min_area):
+        polygons.append({"mode": "add", "points": polygon})
+    return polygons
+
+
+def edit_polygons_to_mask(
+    polygons: Sequence[dict[str, object]],
+    image_shape: tuple[int, int] | tuple[int, int, int],
+) -> np.ndarray:
+    height = int(image_shape[0])
+    width = int(image_shape[1])
+    mask = np.zeros((height, width), dtype=np.uint8)
+    normalized = normalize_edit_polygons(polygons)
+    if cv2 is not None:
+        for item in normalized:
+            points = np.rint(np.asarray(item["points"], dtype=np.float32)).astype(np.int32)
+            if len(points) < 3:
+                continue
+            value = 255 if item["mode"] == "add" else 0
+            cv2.fillPoly(mask, [points.reshape((-1, 1, 2))], value)
+        return mask.astype(bool)
+
+    from PIL import Image, ImageDraw
+
+    image = Image.fromarray(mask, mode="L")
+    draw = ImageDraw.Draw(image)
+    for item in normalized:
+        value = 255 if item["mode"] == "add" else 0
+        draw.polygon([(float(x), float(y)) for x, y in item["points"]], fill=value)
+    return np.array(image, dtype=np.uint8).astype(bool)
+
+
 def bbox_from_mask(mask: np.ndarray) -> list[int]:
     rows, cols = np.where(mask.astype(bool))
     if len(rows) == 0 or len(cols) == 0:
@@ -236,6 +369,29 @@ def bbox_from_mask(mask: np.ndarray) -> list[int]:
     x_max = int(cols.max())
     y_max = int(rows.max())
     return [x_min, y_min, x_max - x_min + 1, y_max - y_min + 1]
+
+
+def bbox_xyxy_from_mask(mask: np.ndarray) -> list[int]:
+    x, y, width, height = bbox_from_mask(mask)
+    if width <= 0 or height <= 0:
+        return [0, 0, 0, 0]
+    return [x, y, x + width - 1, y + height - 1]
+
+
+def coco_rle_from_mask(mask: np.ndarray) -> tuple[dict[str, object], int, list[float]] | None:
+    try:
+        from pycocotools import mask as mask_utils
+    except ImportError:
+        return None
+
+    mask_u8 = np.asfortranarray(np.asarray(mask, dtype=np.uint8))
+    encoded = mask_utils.encode(mask_u8)
+    area = int(mask_utils.area(encoded))
+    bbox = [float(value) for value in mask_utils.toBbox(encoded).tolist()]
+    counts = encoded["counts"]
+    if isinstance(counts, bytes):
+        counts = counts.decode("ascii")
+    return {"size": [int(mask_u8.shape[0]), int(mask_u8.shape[1])], "counts": counts}, area, bbox
 
 
 def polygon_area(points: Sequence[tuple[float, float]]) -> float:
@@ -422,9 +578,78 @@ def write_yolo_segmentation_label(
     return len(lines)
 
 
+def write_mask_rcnn_annotation(
+    path: Path,
+    masks_dir: Path,
+    image_file_name: str,
+    masks: Sequence[np.ndarray],
+    class_ids: Sequence[int],
+    image_shape: tuple[int, int] | tuple[int, int, int],
+) -> int:
+    height = int(image_shape[0])
+    width = int(image_shape[1])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    masks_dir.mkdir(parents=True, exist_ok=True)
+
+    annotations = []
+    category_ids: set[int] = set()
+    rle_count = 0
+    for object_id, (mask, class_id) in enumerate(zip(masks, class_ids), start=1):
+        mask_bool = np.asarray(mask, dtype=bool)
+        area = int(mask_bool.sum())
+        if area <= 0:
+            continue
+        class_id_int = int(class_id)
+        category_ids.add(class_id_int)
+        mask_path = masks_dir / f"object_{object_id:03d}.png"
+        save_png(mask_bool.astype(np.uint8) * 255, mask_path)
+        relative_mask = Path(os.path.relpath(mask_path, path.parent)).as_posix()
+        bbox_xywh = bbox_from_mask(mask_bool)
+        segmentation: dict[str, object] = {
+            "format": "binary_mask_png",
+            "path": relative_mask,
+        }
+        rle_values = coco_rle_from_mask(mask_bool)
+        if rle_values is not None:
+            segmentation, area, bbox_xywh = rle_values
+            rle_count += 1
+        annotations.append(
+            {
+                "id": object_id,
+                "image_id": 1,
+                "category_id": class_id_int,
+                "class_id": class_id_int,
+                "area": area,
+                "bbox": bbox_xywh,
+                "bbox_xywh": bbox_xywh,
+                "bbox_xyxy": bbox_xyxy_from_mask(mask_bool),
+                "iscrowd": 0,
+                "segmentation": segmentation,
+                "mask": relative_mask,
+            }
+        )
+
+    categories = [{"id": category_id, "name": f"class_{category_id}"} for category_id in sorted(category_ids)]
+    image_record = {
+        "id": 1,
+        "file_name": image_file_name,
+        "height": height,
+        "width": width,
+    }
+    payload = {
+        "format": "coco_instance_segmentation_rle_v1" if rle_count == len(annotations) else "mask_rcnn_binary_masks_v1",
+        "image": image_record,
+        "images": [image_record],
+        "annotations": annotations,
+        "categories": categories,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return len(annotations)
+
+
 def write_saved_objects_csv(path: Path, saved_objects: Sequence[SavedObject]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["object_id", "name", "class_id", "area", "bbox_xywh", "score", "color_rgb"]
+    fieldnames = ["object_id", "name", "class_id", "area", "bbox_xywh", "score", "color_rgb", "polygon_count"]
     with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
@@ -438,6 +663,7 @@ def write_saved_objects_csv(path: Path, saved_objects: Sequence[SavedObject]) ->
                     "bbox_xywh": json.dumps(bbox_from_mask(saved.mask), ensure_ascii=False),
                     "score": saved.score,
                     "color_rgb": json.dumps([int(value) for value in saved.color], ensure_ascii=False),
+                    "polygon_count": len(normalize_edit_polygons(saved.edit_polygons)),
                 }
             )
 
@@ -463,6 +689,8 @@ def save_interactive_results(
     csv_path = output_dir / "metadata" / f"{stem}_objects.csv"
     masks_dir = output_dir / "masks" / stem
     yolo_label_path = output_dir / "labels" / f"{stem}.txt"
+    mask_rcnn_annotation_path = output_dir / "mask_rcnn" / f"{stem}.json"
+    mask_rcnn_masks_dir = output_dir / "mask_rcnn" / "masks" / stem
 
     save_training_image(image, train_image_path)
     save_png(render_saved_overlay(image, saved_objects), overlay_path)
@@ -492,6 +720,18 @@ def save_interactive_results(
             min_area=yolo_min_area,
         )
         outputs["yolo_label"] = yolo_label_path
+
+    if wants_mask_rcnn_export(export_format):
+        write_mask_rcnn_annotation(
+            mask_rcnn_annotation_path,
+            mask_rcnn_masks_dir,
+            output_image_name,
+            masks,
+            class_ids,
+            image.shape,
+        )
+        outputs["mask_rcnn_annotation"] = mask_rcnn_annotation_path
+        outputs["mask_rcnn_masks_dir"] = mask_rcnn_masks_dir
 
     if save_object_masks:
         masks_dir.mkdir(parents=True, exist_ok=True)

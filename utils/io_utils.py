@@ -74,6 +74,7 @@ def output_paths_for(image_path: Path, input_path: Path, output_dir: Path) -> Ou
     preview_base = output_dir / "previews" / rel_stem
     metadata_base = output_dir / "metadata" / rel_stem
     label_base = output_dir / "labels" / rel_stem
+    mask_rcnn_base = output_dir / "mask_rcnn" / rel_stem
 
     return OutputPaths(
         train_image=output_dir / "img" / rel_image,
@@ -83,6 +84,8 @@ def output_paths_for(image_path: Path, input_path: Path, output_dir: Path) -> Ou
         objects_csv=metadata_base.parent / f"{metadata_base.name}_objects.csv",
         masks_dir=output_dir / "masks" / rel_stem,
         yolo_label=label_base.with_suffix(".txt"),
+        mask_rcnn_annotation=mask_rcnn_base.parent / f"{mask_rcnn_base.name}.json",
+        mask_rcnn_masks_dir=output_dir / "mask_rcnn" / "masks" / rel_stem,
     )
 
 
@@ -111,8 +114,12 @@ def save_png(array: np.ndarray, path: Path) -> None:
 
 
 def wants_yolo_export(export_format: str) -> bool:
-    return export_format in {"yolo", "both"}
+    return export_format in {"yolo", "both", "all"}
 
 
 def wants_mask_export(export_format: str) -> bool:
-    return export_format in {"mask", "both"}
+    return export_format in {"mask", "both", "all"}
+
+
+def wants_mask_rcnn_export(export_format: str) -> bool:
+    return export_format in {"mask_rcnn", "all"}

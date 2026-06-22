@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -32,7 +32,7 @@ PREFERRED_IMAGE_FOLDER = (
 )
 
 DEFAULT_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff")
-EXPORT_FORMATS = ("yolo", "mask", "both", "none")
+EXPORT_FORMATS = ("yolo", "mask", "mask_rcnn", "both", "all", "none")
 
 MODEL_PRESETS = {
     "tiny": {
@@ -92,6 +92,8 @@ class OutputPaths:
     objects_csv: Path
     masks_dir: Path
     yolo_label: Path
+    mask_rcnn_annotation: Path
+    mask_rcnn_masks_dir: Path
 
 
 @dataclass
@@ -105,6 +107,7 @@ class ProcessResult:
     color_mask: Path | None = None
     objects_csv: Path | None = None
     yolo_label: Path | None = None
+    mask_rcnn_annotation: Path | None = None
     error: str = ""
 
 
@@ -115,3 +118,4 @@ class SavedObject:
     color: np.ndarray
     score: float
     class_id: int = 0
+    edit_polygons: list[dict[str, object]] = field(default_factory=list)

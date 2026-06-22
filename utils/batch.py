@@ -9,6 +9,7 @@ from utils.export_utils import (
     render_masks,
     sorted_annotations,
     write_objects_csv,
+    write_mask_rcnn_annotation,
     write_yolo_segmentation_label,
 )
 from utils.io_utils import (
@@ -19,6 +20,7 @@ from utils.io_utils import (
     save_png,
     save_training_image,
     wants_mask_export,
+    wants_mask_rcnn_export,
     wants_yolo_export,
 )
 from utils.model_utils import build_mask_generator, inference_autocast
@@ -51,6 +53,8 @@ def process_one_image(
         expected_label = paths.yolo_label
     elif wants_mask_export(config.export_format):
         expected_label = paths.mask_label
+    elif wants_mask_rcnn_export(config.export_format):
+        expected_label = paths.mask_rcnn_annotation
 
     if (
         config.skip_existing
@@ -65,6 +69,7 @@ def process_one_image(
             overlay=paths.overlay,
             yolo_label=paths.yolo_label if paths.yolo_label.exists() else None,
             mask_label=paths.mask_label if paths.mask_label.exists() else None,
+            mask_rcnn_annotation=paths.mask_rcnn_annotation if paths.mask_rcnn_annotation.exists() else None,
         )
 
     image = load_rgb_image(image_path)
@@ -84,6 +89,7 @@ def process_one_image(
 
     saved_mask_label = None
     saved_yolo_label = None
+    saved_mask_rcnn_annotation = None
     if wants_mask_export(config.export_format):
         save_png(build_class_label_mask(masks, class_ids, image.shape), paths.mask_label)
         saved_mask_label = paths.mask_label
@@ -99,6 +105,17 @@ def process_one_image(
         )
         saved_yolo_label = paths.yolo_label
 
+    if wants_mask_rcnn_export(config.export_format):
+        write_mask_rcnn_annotation(
+            paths.mask_rcnn_annotation,
+            paths.mask_rcnn_masks_dir,
+            paths.train_image.name,
+            masks,
+            class_ids,
+            image.shape,
+        )
+        saved_mask_rcnn_annotation = paths.mask_rcnn_annotation
+
     if config.save_individual_masks:
         save_individual_masks(paths, annotations)
 
@@ -112,6 +129,7 @@ def process_one_image(
         color_mask=paths.color_mask,
         objects_csv=paths.objects_csv,
         yolo_label=saved_yolo_label,
+        mask_rcnn_annotation=saved_mask_rcnn_annotation,
     )
 
 
@@ -128,6 +146,7 @@ def write_summary_csv(output_dir: Path, results: list[ProcessResult]) -> Path:
         "color_mask",
         "objects_csv",
         "yolo_label",
+        "mask_rcnn_annotation",
         "error",
     ]
     with summary_path.open("w", newline="", encoding="utf-8") as file:
@@ -145,6 +164,7 @@ def write_summary_csv(output_dir: Path, results: list[ProcessResult]) -> Path:
                     "color_mask": str(result.color_mask or ""),
                     "objects_csv": str(result.objects_csv or ""),
                     "yolo_label": str(result.yolo_label or ""),
+                    "mask_rcnn_annotation": str(result.mask_rcnn_annotation or ""),
                     "error": result.error,
                 }
             )
@@ -168,6 +188,8 @@ def process_batch(config: SamBatchConfig, log: LogFn = print, progress: bool = T
                 label_targets.append(str(paths.yolo_label))
             if wants_mask_export(config.export_format):
                 label_targets.append(str(paths.mask_label))
+            if wants_mask_rcnn_export(config.export_format):
+                label_targets.append(str(paths.mask_rcnn_annotation))
             label_text = ", ".join(label_targets) if label_targets else "no training label"
             log(f"DRY RUN: {image} -> image: {paths.train_image}; labels: {label_text}")
         return []
