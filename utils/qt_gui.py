@@ -70,6 +70,7 @@ from utils.io_utils import collect_images, color_for_index, load_rgb_image
 from utils.model_utils import build_image_predictor, inference_autocast
 
 import os
+import json
 import queue
 import sys
 import threading
@@ -210,6 +211,8 @@ class PySideSamWindow(QMainWindow):
         self.image_index = -1
         self.image_folder: Path | None = None
         self.output_dir: Path | None = None
+        self.annotation_index_dir: Path | None = None
+        self.annotation_records: list[dict[str, object]] = []
         self.hough_result: HoughPreprocessResult | None = None
         self.hough_preview_active = False
         self.hough_running = False
@@ -369,6 +372,18 @@ class PySideSamWindow(QMainWindow):
         nav_row.addWidget(prev_button)
         nav_row.addWidget(next_button)
         layout.addLayout(nav_row)
+
+        jump_row = QHBoxLayout()
+        jump_row.setSpacing(6)
+        self.image_jump_spin = QSpinBox()
+        self.image_jump_spin.setRange(1, 1)
+        self.image_jump_spin.setPrefix("image ")
+        self.image_jump_spin.setEnabled(False)
+        jump_button = QPushButton("Go")
+        jump_button.clicked.connect(self.jump_to_image)
+        jump_row.addWidget(self.image_jump_spin)
+        jump_row.addWidget(jump_button)
+        layout.addLayout(jump_row)
 
         self.output_label = QLabel("Output: not selected")
         self.output_label.setObjectName("muted")
@@ -624,15 +639,256 @@ class PySideSamWindow(QMainWindow):
     def update_image_counter(self) -> None:
         if self.image_path is None:
             self.image_counter_label.setText("No image loaded")
+            if hasattr(self, "image_jump_spin"):
+                self.image_jump_spin.setEnabled(False)
             return
         if self.image_files and self.image_index >= 0:
             self.image_counter_label.setText(f"{self.image_index + 1}/{len(self.image_files)}  {self.image_path.name}")
         else:
             self.image_counter_label.setText(f"Single  {self.image_path.name}")
+        if hasattr(self, "image_jump_spin"):
+            self.image_jump_spin.blockSignals(True)
+            try:
+                count = max(1, len(self.image_files))
+                value = self.image_index + 1 if self.image_files and self.image_index >= 0 else 1
+                self.image_jump_spin.setRange(1, count)
+                self.image_jump_spin.setValue(max(1, min(value, count)))
+                self.image_jump_spin.setEnabled(bool(self.image_files))
+            finally:
+                self.image_jump_spin.blockSignals(False)
 
     def update_output_label(self) -> None:
         text = f"Output: {self.output_dir}" if self.output_dir else "Output: not selected"
         self.output_label.setText(text)
+
+    def invalidate_annotation_index(self) -> None:
+        self.annotation_index_dir = None
+        self.annotation_records.clear()
+
+    @staticmethod
+    def safe_resolve_text(path: Path) -> str:
+        try:
+            return str(path.resolve()).casefold()
+        except OSError:
+            return str(path).casefold()
+
+    @staticmethod
+    def meaningful_folder_tokens(parts: Sequence[str]) -> set[str]:
+        ignored = {"", ".", "metadata", "labels", "img", "images", "previews", "masks", "mask_rcnn"}
+        return {part.casefold() for part in parts if part.casefold() not in ignored}
+
+    def annotation_path_tokens(self, annotation_path: Path, output_dir: Path) -> set[str]:
+        try:
+            parent_parts = annotation_path.relative_to(output_dir).parent.parts
+        except ValueError:
+            parent_parts = annotation_path.parent.parts
+        return self.meaningful_folder_tokens(parent_parts)
+
+    def build_annotation_index(self) -> None:
+        if self.output_dir is None:
+            self.annotation_index_dir = None
+            self.annotation_records.clear()
+            return
+        output_dir = self.output_dir
+        if self.annotation_index_dir == output_dir and self.annotation_records:
+            return
+
+        records: list[dict[str, object]] = []
+        if output_dir.exists():
+            for annotation_path in output_dir.rglob("*_annotation.json"):
+                try:
+                    payload = json.loads(annotation_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                source = payload.get("source", {}) if isinstance(payload, dict) else {}
+                image = payload.get("image", {}) if isinstance(payload, dict) else {}
+                if not isinstance(source, dict) or not isinstance(image, dict):
+                    continue
+                source_path_text = str(source.get("absolute_path") or source.get("path") or "")
+                source_parent = Path(source_path_text).parent.name if source_path_text else ""
+                path_tokens = self.annotation_path_tokens(annotation_path, output_dir)
+                if source_parent:
+                    path_tokens.add(source_parent.casefold())
+                records.append(
+                    {
+                        "kind": "annotation",
+                        "path": annotation_path,
+                        "mtime": annotation_path.stat().st_mtime,
+                        "source_abs": source_path_text.casefold(),
+                        "source_name": str(source.get("file_name") or "").casefold(),
+                        "source_stem": str(source.get("stem") or "").casefold(),
+                        "source_parent": source_parent.casefold(),
+                        "image_name": str(image.get("file_name") or "").casefold(),
+                        "image_stem": str(image.get("stem") or annotation_path.stem.replace("_annotation", "")).casefold(),
+                        "path_tokens": path_tokens,
+                        "width": int(image.get("width") or 0),
+                        "height": int(image.get("height") or 0),
+                    }
+                )
+
+            for label_path in output_dir.rglob("*.txt"):
+                if label_path.parent.name.lower() != "labels":
+                    continue
+                if label_path.name.startswith("."):
+                    continue
+                records.append(
+                    {
+                        "kind": "yolo",
+                        "path": label_path,
+                        "mtime": label_path.stat().st_mtime,
+                        "source_abs": "",
+                        "source_name": f"{label_path.stem}".casefold(),
+                        "source_stem": label_path.stem.casefold(),
+                        "source_parent": "",
+                        "image_name": f"{label_path.stem}{label_path.suffix}".casefold(),
+                        "image_stem": label_path.stem.casefold(),
+                        "path_tokens": self.annotation_path_tokens(label_path, output_dir),
+                        "width": 0,
+                        "height": 0,
+                    }
+                )
+
+        self.annotation_index_dir = output_dir
+        self.annotation_records = records
+
+    def annotation_match_score(self, record: dict[str, object], image_path: Path, image_shape=None) -> int:
+        image_abs = self.safe_resolve_text(image_path)
+        name = image_path.name.casefold()
+        stem = image_path.stem.casefold()
+        score = 0
+        if record.get("source_abs") and str(record["source_abs"]) == image_abs:
+            score += 1000
+        if record.get("source_parent") and record.get("source_parent") == image_path.parent.name.casefold():
+            score += 80
+        if record.get("source_name") == name:
+            score += 240
+        if record.get("image_name") == name:
+            score += 220
+        if record.get("source_stem") == stem:
+            score += 120
+        if record.get("image_stem") == stem:
+            score += 110
+        record_tokens = record.get("path_tokens")
+        if isinstance(record_tokens, set) and record_tokens:
+            image_tokens = self.meaningful_folder_tokens(image_path.parent.parts)
+            score += min(90, 30 * len(record_tokens.intersection(image_tokens)))
+        if image_shape is not None:
+            height = int(image_shape[0])
+            width = int(image_shape[1])
+            if int(record.get("width") or 0) == width and int(record.get("height") or 0) == height:
+                score += 40
+        return score
+
+    def find_annotation_record_for_image(self, image_path: Path, image_shape=None) -> dict[str, object] | None:
+        self.build_annotation_index()
+        best: tuple[int, float, dict[str, object]] | None = None
+        for record in self.annotation_records:
+            score = self.annotation_match_score(record, image_path, image_shape)
+            if score < 100:
+                continue
+            mtime = float(record.get("mtime") or 0.0)
+            if best is None or (score, mtime) > (best[0], best[1]):
+                best = (score, mtime, record)
+        return best[2] if best is not None else None
+
+    def image_has_existing_annotation(self, image_path: Path) -> bool:
+        return self.find_annotation_record_for_image(image_path) is not None
+
+    def first_unprocessed_image_index(self) -> int:
+        for index, image_path in enumerate(self.image_files):
+            if not self.image_has_existing_annotation(image_path):
+                return index
+        return 0
+
+    def saved_objects_from_annotation_json(self, path: Path) -> list[SavedObject]:
+        if self.image_np is None:
+            return []
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        objects = payload.get("objects", []) if isinstance(payload, dict) else []
+        saved_objects: list[SavedObject] = []
+        for object_index, item in enumerate(objects, start=1):
+            if not isinstance(item, dict):
+                continue
+            polygons = item.get("yolo_polygons", [])
+            if not isinstance(polygons, list):
+                continue
+            mask = yolo_edit_polygons_to_mask(polygons, self.image_np.shape)
+            if not mask.any():
+                continue
+            color_values = item.get("color_rgb")
+            try:
+                color = np.array(color_values, dtype=np.uint8) if color_values else color_for_index(object_index)
+                if color.shape != (3,):
+                    color = color_for_index(object_index)
+            except Exception:
+                color = color_for_index(object_index)
+            saved_objects.append(
+                SavedObject(
+                    name=str(item.get("name") or f"Object {object_index}"),
+                    mask=mask,
+                    color=color,
+                    score=float(item.get("score") or 1.0),
+                    class_id=int(item.get("class_id") or 0),
+                    yolo_polygons=polygons,
+                )
+            )
+        return saved_objects
+
+    def saved_objects_from_yolo_label(self, path: Path) -> list[SavedObject]:
+        if self.image_np is None:
+            return []
+        height, width = self.image_np.shape[:2]
+        saved_objects: list[SavedObject] = []
+        for object_index, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            parts = line.strip().split()
+            if len(parts) < 7 or len(parts[1:]) % 2:
+                continue
+            try:
+                class_id = int(float(parts[0]))
+                coords = [float(value) for value in parts[1:]]
+            except ValueError:
+                continue
+            points = []
+            for index in range(0, len(coords), 2):
+                points.append((coords[index] * width, coords[index + 1] * height))
+            polygons = [{"mode": "add", "points": points}]
+            mask = yolo_edit_polygons_to_mask(polygons, self.image_np.shape)
+            if not mask.any():
+                continue
+            saved_objects.append(
+                SavedObject(
+                    name=f"Object {object_index}",
+                    mask=mask,
+                    color=color_for_index(object_index),
+                    score=1.0,
+                    class_id=class_id,
+                    yolo_polygons=polygons,
+                )
+            )
+        return saved_objects
+
+    def restore_existing_annotation_for_current_image(self) -> bool:
+        if self.image_path is None or self.image_np is None or self.output_dir is None:
+            return False
+        record = self.find_annotation_record_for_image(self.image_path, self.image_np.shape)
+        if record is None:
+            return False
+        path = Path(record["path"])
+        try:
+            if record.get("kind") == "annotation":
+                restored = self.saved_objects_from_annotation_json(path)
+            else:
+                restored = self.saved_objects_from_yolo_label(path)
+        except Exception as exc:
+            self.set_status(f"Could not restore annotation: {exc}")
+            return False
+        if not restored:
+            return False
+        self.saved_objects = restored
+        self.dirty = False
+        self.update_object_list()
+        self.set_status(f"Restored {len(restored)} object(s) from {path.name}")
+        return True
 
     def reset_annotation_state(self) -> None:
         self.points.clear()
@@ -817,10 +1073,12 @@ class PySideSamWindow(QMainWindow):
             return
 
         self.reset_annotation_state()
+        restored = self.restore_existing_annotation_for_current_image()
         self.render_canvas(fit=True)
         self.update_image_counter()
         self.setWindowTitle(f"SAM 2 Studio - {path.name}")
-        self.set_status(f"Opened {path.name}")
+        if not restored:
+            self.set_status(f"Opened {path.name}")
         self.load_model_async(force=False)
 
     def open_image(self) -> None:
@@ -860,8 +1118,9 @@ class PySideSamWindow(QMainWindow):
             return
         self.image_folder = folder_path
         self.image_files = images
-        self.image_index = 0
         self.output_dir = folder_path / "sam2_dataset"
+        self.invalidate_annotation_index()
+        self.image_index = self.first_unprocessed_image_index()
         self.update_output_label()
         self.load_image_path(self.image_files[self.image_index])
 
@@ -871,8 +1130,27 @@ class PySideSamWindow(QMainWindow):
         if not selected:
             return
         self.output_dir = Path(selected)
+        self.invalidate_annotation_index()
         self.update_output_label()
+        if self.image_files and self.image_folder is not None and not self.has_unsaved_work():
+            self.image_index = self.first_unprocessed_image_index()
+            self.load_image_path(self.image_files[self.image_index])
+            return
+        if self.image_path is not None and not self.has_unsaved_work():
+            self.restore_existing_annotation_for_current_image()
+            self.render_canvas()
         self.set_status(f"Output folder: {self.output_dir}")
+
+    def jump_to_image(self) -> None:
+        if not self.image_files:
+            return
+        index = int(self.image_jump_spin.value()) - 1
+        if not (0 <= index < len(self.image_files)) or index == self.image_index:
+            return
+        if not self.confirm_discard_work():
+            return
+        self.image_index = index
+        self.load_image_path(self.image_files[self.image_index])
 
     def previous_image(self) -> None:
         if not self.image_files or self.image_index <= 0:
@@ -1510,6 +1788,7 @@ class PySideSamWindow(QMainWindow):
             QMessageBox.critical(self, "Save results", str(exc))
             return False
         self.dirty = False
+        self.invalidate_annotation_index()
         self.set_status(f"Saved: {outputs['overlay']}")
         return True
 

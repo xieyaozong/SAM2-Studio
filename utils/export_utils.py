@@ -730,6 +730,53 @@ def write_saved_objects_csv(path: Path, saved_objects: Sequence[SavedObject]) ->
             )
 
 
+def saved_object_to_annotation_payload(saved: SavedObject, object_id: int) -> dict[str, object]:
+    return {
+        "id": object_id,
+        "name": saved.name,
+        "class_id": int(saved.class_id),
+        "score": float(saved.score),
+        "color_rgb": [int(value) for value in saved.color],
+        "yolo_polygons": normalize_yolo_edit_polygons(saved.yolo_polygons),
+    }
+
+
+def write_saved_objects_annotation_json(
+    path: Path,
+    source_image_path: Path,
+    output_image_name: str,
+    image_shape: tuple[int, int] | tuple[int, int, int],
+    saved_objects: Sequence[SavedObject],
+) -> None:
+    height = int(image_shape[0])
+    width = int(image_shape[1])
+    try:
+        source_abs = str(source_image_path.resolve())
+    except OSError:
+        source_abs = str(source_image_path)
+    payload = {
+        "format": "sam2_studio_annotation_v1",
+        "source": {
+            "path": str(source_image_path),
+            "absolute_path": source_abs,
+            "file_name": source_image_path.name,
+            "stem": source_image_path.stem,
+        },
+        "image": {
+            "file_name": output_image_name,
+            "stem": Path(output_image_name).stem,
+            "height": height,
+            "width": width,
+        },
+        "objects": [
+            saved_object_to_annotation_payload(saved, object_id)
+            for object_id, saved in enumerate(saved_objects, start=1)
+        ],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def save_interactive_results(
     image_path: Path,
     output_dir: Path,
@@ -749,6 +796,7 @@ def save_interactive_results(
     mask_label_path = output_dir / "labels" / f"{stem}.png"
     color_path = output_dir / "previews" / f"{stem}_color_mask.png"
     csv_path = output_dir / "metadata" / f"{stem}_objects.csv"
+    annotation_path = output_dir / "metadata" / f"{stem}_annotation.json"
     masks_dir = output_dir / "masks" / stem
     yolo_label_path = output_dir / "labels" / f"{stem}.txt"
     mask_rcnn_annotation_path = output_dir / "mask_rcnn" / f"{stem}.json"
@@ -758,12 +806,14 @@ def save_interactive_results(
     save_png(render_saved_overlay(image, saved_objects), overlay_path)
     save_png(build_color_mask(saved_objects), color_path)
     write_saved_objects_csv(csv_path, saved_objects)
+    write_saved_objects_annotation_json(annotation_path, image_path, output_image_name, image.shape, saved_objects)
 
     outputs = {
         "train_image": train_image_path,
         "overlay": overlay_path,
         "color_mask": color_path,
         "objects_csv": csv_path,
+        "annotation": annotation_path,
     }
 
     masks = [saved.mask for saved in saved_objects]
