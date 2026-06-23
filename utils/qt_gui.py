@@ -91,6 +91,8 @@ class SamCanvasView(QGraphicsView):
         self.has_image = False
         self.edit_mode = False
         self.dragging_edit = False
+        self.middle_panning = False
+        self.last_pan_pos = None
         self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
@@ -130,6 +132,10 @@ class SamCanvasView(QGraphicsView):
             self.scene_obj.addItem(item)
             self.point_items.append(item)
 
+    @staticmethod
+    def event_pos(event):
+        return event.position().toPoint() if hasattr(event, "position") else event.pos()
+
     def fit_image(self) -> None:
         if self.has_image:
             self.fitInView(self.scene_obj.sceneRect(), Qt.KeepAspectRatio)
@@ -142,6 +148,12 @@ class SamCanvasView(QGraphicsView):
         self.scale(factor, factor)
 
     def mousePressEvent(self, event) -> None:
+        if self.has_image and event.button() == Qt.MiddleButton:
+            self.middle_panning = True
+            self.last_pan_pos = self.event_pos(event)
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
         if self.has_image and self.edit_mode and event.button() in {Qt.LeftButton, Qt.RightButton}:
             point = self.mapToScene(event.pos())
             rect = self.scene_obj.sceneRect()
@@ -159,6 +171,14 @@ class SamCanvasView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        if self.has_image and self.middle_panning and self.last_pan_pos is not None:
+            pos = self.event_pos(event)
+            delta = pos - self.last_pan_pos
+            self.last_pan_pos = pos
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - int(delta.x()))
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(delta.y()))
+            event.accept()
+            return
         if self.has_image and self.edit_mode and self.dragging_edit:
             point = self.mapToScene(event.pos())
             rect = self.scene_obj.sceneRect()
@@ -168,6 +188,12 @@ class SamCanvasView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if self.middle_panning and event.button() == Qt.MiddleButton:
+            self.middle_panning = False
+            self.last_pan_pos = None
+            self.unsetCursor()
+            event.accept()
+            return
         if self.has_image and self.edit_mode and self.dragging_edit:
             point = self.mapToScene(event.pos())
             self.dragging_edit = False
@@ -397,10 +423,10 @@ class PySideSamWindow(QMainWindow):
         self.add_button = QPushButton("Add")
         self.add_button.setCheckable(True)
         self.add_button.setChecked(True)
-        self.add_button.setProperty("accent", True)
+        self.add_button.setProperty("mode", "add")
         self.remove_button = QPushButton("Remove")
         self.remove_button.setCheckable(True)
-        self.remove_button.setProperty("danger", True)
+        self.remove_button.setProperty("mode", "remove")
         mode_group = QButtonGroup(self)
         mode_group.addButton(self.add_button)
         mode_group.addButton(self.remove_button)
@@ -559,15 +585,17 @@ class PySideSamWindow(QMainWindow):
         self.draft_polygon_combo.addItem("Cut mask hole", "subtract")
         layout.addWidget(self.draft_polygon_combo)
 
-        new_polygon = QPushButton("New YOLO Polygon")
-        new_polygon.clicked.connect(self.start_draft_polygon)
+        self.new_polygon_button = QPushButton("New YOLO Polygon")
+        self.new_polygon_button.setCheckable(True)
+        self.new_polygon_button.setProperty("activeAction", True)
+        self.new_polygon_button.clicked.connect(self.start_draft_polygon)
 
         finish_polygon = QPushButton("Finish Polygon")
         finish_polygon.clicked.connect(self.finish_draft_polygon)
 
         cancel_polygon = QPushButton("Cancel Polygon")
         cancel_polygon.clicked.connect(self.cancel_draft_polygon)
-        self.add_button_row(layout, new_polygon, finish_polygon)
+        self.add_button_row(layout, self.new_polygon_button, finish_polygon)
         layout.addWidget(cancel_polygon)
 
         delete_vertex = QPushButton("Delete Selected Vertex")
@@ -1165,6 +1193,8 @@ class PySideSamWindow(QMainWindow):
         self.selected_vertex_index = -1
         self.draft_polygon_points.clear()
         self.draft_polygon_active = False
+        if hasattr(self, "new_polygon_button"):
+            self.new_polygon_button.setChecked(False)
         self.image_ready = False
         self.dirty = False
         self.point_version += 1
@@ -1774,6 +1804,8 @@ class PySideSamWindow(QMainWindow):
             self.edit_drag_target = None
             self.draft_polygon_points.clear()
             self.draft_polygon_active = False
+            if hasattr(self, "new_polygon_button"):
+                self.new_polygon_button.setChecked(False)
         self.render_canvas()
         self.set_status("YOLO polygon edit mode" if enabled else "Point mode")
 
@@ -1896,10 +1928,12 @@ class PySideSamWindow(QMainWindow):
     def start_draft_polygon(self) -> None:
         if self.active_polygon_target_index() is None:
             self.set_status("Create a SAM2 mask first or select an object")
+            self.new_polygon_button.setChecked(False)
             return
         self.polygon_edit_check.setChecked(True)
         self.draft_polygon_points.clear()
         self.draft_polygon_active = True
+        self.new_polygon_button.setChecked(True)
         self.set_status("Draft polygon started")
         self.render_canvas()
 
@@ -1919,6 +1953,7 @@ class PySideSamWindow(QMainWindow):
         self.selected_vertex_index = -1
         self.draft_polygon_points.clear()
         self.draft_polygon_active = False
+        self.new_polygon_button.setChecked(False)
         self.rebuild_target_mask_from_polygons(target_index)
         self.update_object_list()
         self.render_canvas()
@@ -1927,6 +1962,7 @@ class PySideSamWindow(QMainWindow):
     def cancel_draft_polygon(self) -> None:
         self.draft_polygon_points.clear()
         self.draft_polygon_active = False
+        self.new_polygon_button.setChecked(False)
         self.render_canvas()
         self.set_status("Draft polygon canceled")
 
@@ -2203,6 +2239,16 @@ def apply_style(app: QApplication) -> None:
             border-color: #0f9f8d;
             color: #0f766e;
         }
+        QPushButton[mode="add"]:checked, QPushButton[activeAction="true"]:checked {
+            background: #0f9f8d;
+            border-color: #0f766e;
+            color: #ffffff;
+        }
+        QPushButton[mode="remove"]:checked {
+            background: #be123c;
+            border-color: #9f1239;
+            color: #ffffff;
+        }
         QPushButton[accent="true"] {
             background: #0f9f8d;
             border-color: #0f766e;
@@ -2240,7 +2286,26 @@ def apply_style(app: QApplication) -> None:
             padding: 7px 8px;
             min-height: 20px;
         }
-        QCheckBox { color: #334155; spacing: 8px; }
+        QCheckBox {
+            color: #334155;
+            spacing: 8px;
+            padding: 3px 2px;
+        }
+        QCheckBox:checked {
+            color: #0f766e;
+            font-weight: 700;
+        }
+        QCheckBox::indicator {
+            width: 15px;
+            height: 15px;
+            border-radius: 4px;
+            border: 1px solid #94a3b8;
+            background: #ffffff;
+        }
+        QCheckBox::indicator:checked {
+            background: #0f9f8d;
+            border-color: #0f766e;
+        }
         QListWidget {
             background: #ffffff;
             border: 1px solid #cbd7e6;
