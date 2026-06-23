@@ -7,25 +7,36 @@
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white&style=flat-square)
 ![License](https://img.shields.io/badge/License-Apache_2.0-d97706?style=flat-square)
 
-Windows desktop app for interactive image segmentation with Meta's Segment Anything Model 2. SAM2 is installed from Meta's upstream repository instead of being vendored here.
+Windows desktop label-assist tool for building segmentation datasets with Meta's Segment Anything Model 2. It combines SAM2 prompts, optional Hough preprocessing, editable mask polygons, SAM-assisted hole cutting, and export-ready YOLO / Mask R-CNN labels.
 
 ![Workflow](assets/workflow.png)
 
 ## What It Does
 
-- Opens a single image or steps through a folder.
-- Adds foreground and background clicks to guide SAM2.
-- Adjusts YOLO polygons generated from the active SAM2 mask and reflects them back into the saved mask without rerunning SAM2.
-- Applies optional Hough or foreground preprocessing before annotation.
-- Uses the full masked image or an adaptive center crop.
-- Exports YOLO segmentation labels, mask images, Mask R-CNN COCO/RLE annotations, overlays, and object metadata.
-- Builds a single-window Windows executable.
+- Opens a single image or walks through a folder queue.
+- Uses foreground/background prompts to create active SAM2 masks.
+- Applies optional Hough masking or center-crop preprocessing before annotation.
+- Converts masks into editable add/cut polygons, with undo support for manual edits.
+- Uses click-to-cut SAM Hole mode to create inner holes inside an existing mask target.
+- Reuses crop and polygon templates across similar images.
+- Restores existing annotations from the selected output folder so earlier work can be edited.
+- Exports YOLO segmentation labels, binary/color masks, Mask R-CNN COCO/RLE annotations, overlays, and object metadata.
+- Builds a ready-to-run Windows executable.
 
 ## Interface
 
 ![Interface layout](assets/interface.png)
 
-The app centers on an image canvas with foreground/background clicks and the predicted mask overlay. Side tabs keep annotation, preprocessing, export, object review, and YOLO polygon editing tools separated.
+The app centers on an image canvas with SAM prompts, mask overlays, editable polygons, middle-mouse panning, and throttled rendering for smoother annotation. Side tabs separate image input, Hough preprocessing, label export, object review, reusable templates, polygon edits, whole-target moves, and SAM Hole cutting.
+
+## Typical Workflow
+
+1. Open an image or folder and choose an output folder.
+2. Add foreground/background prompts to create an active SAM2 mask.
+3. Add the active mask to the object list.
+4. Refine the target with Polygon mode, whole-target move, or SAM Hole mode.
+5. Capture a template when several images share the same crop and mask layout.
+6. Save labels, or use Save & Next to continue through the folder queue.
 
 ## Layout
 

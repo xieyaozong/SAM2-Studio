@@ -207,8 +207,8 @@ class PySideSamWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("SAM 2 Studio")
-        self.resize(1280, 820)
-        self.setMinimumSize(760, 520)
+        self.resize(1440, 900)
+        self.setMinimumSize(980, 620)
 
         default_model = "large" if torch.cuda.is_available() else "tiny"
         self.messages: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -323,12 +323,12 @@ class PySideSamWindow(QMainWindow):
         left_layout.addWidget(self.left_tabs, 1)
         self.populate_left_controls(self.left_tabs)
 
-        self.save_button = QPushButton("Save Current")
+        self.save_button = QPushButton("Save Labels")
         self.save_button.setObjectName("primarySaveButton")
         self.save_button.clicked.connect(self.save_results)
         left_layout.addWidget(self.save_button)
 
-        self.save_next_button = QPushButton("Save + Next")
+        self.save_next_button = QPushButton("Save & Next")
         self.save_next_button.setObjectName("secondarySaveButton")
         self.save_next_button.clicked.connect(self.save_and_next)
         left_layout.addWidget(self.save_next_button)
@@ -352,7 +352,7 @@ class PySideSamWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
-        splitter.setSizes([300, 680, 300])
+        splitter.setSizes([330, 760, 350])
 
     def make_tab_layout(self, tabs: QTabWidget, title: str, *, scroll: bool = True) -> QVBoxLayout:
         if scroll:
@@ -387,8 +387,8 @@ class PySideSamWindow(QMainWindow):
         layout.addLayout(row)
 
     def populate_left_controls(self, tabs: QTabWidget) -> None:
-        layout = self.make_tab_layout(tabs, "Annotate")
-        layout.addWidget(self.section("File"))
+        layout = self.make_tab_layout(tabs, "Input")
+        layout.addWidget(self.section("Images"))
         open_image_button = QPushButton("Open Image")
         open_image_button.clicked.connect(self.open_image)
 
@@ -396,11 +396,11 @@ class PySideSamWindow(QMainWindow):
         open_folder_button.clicked.connect(self.open_folder)
         self.add_button_row(layout, open_image_button, open_folder_button)
 
-        output_button = QPushButton("Output Folder")
+        output_button = QPushButton("Choose Output Folder")
         output_button.clicked.connect(self.choose_output_folder)
         layout.addWidget(output_button)
 
-        self.folder_recursive_check = QCheckBox("Recursive folder")
+        self.folder_recursive_check = QCheckBox("Include subfolders")
         self.folder_recursive_check.setChecked(True)
         layout.addWidget(self.folder_recursive_check)
 
@@ -410,7 +410,7 @@ class PySideSamWindow(QMainWindow):
 
         nav_row = QHBoxLayout()
         nav_row.setSpacing(6)
-        prev_button = QPushButton("Prev")
+        prev_button = QPushButton("Previous")
         prev_button.clicked.connect(self.previous_image)
         next_button = QPushButton("Next")
         next_button.clicked.connect(self.next_image)
@@ -422,7 +422,7 @@ class PySideSamWindow(QMainWindow):
         jump_row.setSpacing(6)
         self.image_jump_spin = QSpinBox()
         self.image_jump_spin.setRange(1, 1)
-        self.image_jump_spin.setPrefix("image ")
+        self.image_jump_spin.setPrefix("Image ")
         self.image_jump_spin.setEnabled(False)
         jump_button = QPushButton("Go")
         jump_button.clicked.connect(self.jump_to_image)
@@ -435,14 +435,14 @@ class PySideSamWindow(QMainWindow):
         self.output_label.setWordWrap(True)
         layout.addWidget(self.output_label)
 
-        layout.addWidget(self.section("Point Mode"))
+        layout.addWidget(self.section("SAM Prompts"))
         mode_row = QHBoxLayout()
         mode_row.setSpacing(6)
-        self.add_button = QPushButton("Add")
+        self.add_button = QPushButton("Foreground")
         self.add_button.setCheckable(True)
         self.add_button.setChecked(True)
         self.add_button.setProperty("mode", "add")
-        self.remove_button = QPushButton("Remove")
+        self.remove_button = QPushButton("Background")
         self.remove_button.setCheckable(True)
         self.remove_button.setProperty("mode", "remove")
         mode_group = QButtonGroup(self)
@@ -454,15 +454,15 @@ class PySideSamWindow(QMainWindow):
         mode_row.addWidget(self.remove_button)
         layout.addLayout(mode_row)
 
-        layout.addWidget(self.section("Mask Actions"))
-        self.accept_button = QPushButton("Accept Mask")
+        layout.addWidget(self.section("Active Mask"))
+        self.accept_button = QPushButton("Add Mask To Objects")
         self.accept_button.setProperty("accent", True)
         self.accept_button.clicked.connect(self.accept_current_mask)
         layout.addWidget(self.accept_button)
 
-        undo_button = QPushButton("Undo Point")
+        undo_button = QPushButton("Undo Prompt")
         undo_button.clicked.connect(self.undo_point)
-        clear_button = QPushButton("Clear Points")
+        clear_button = QPushButton("Clear Prompts")
         clear_button.clicked.connect(self.clear_points)
         self.add_button_row(layout, undo_button, clear_button)
 
@@ -476,23 +476,23 @@ class PySideSamWindow(QMainWindow):
         self.add_button_row(layout, zoom_out, fit, zoom_in)
         layout.addStretch(1)
 
-        layout = self.make_tab_layout(tabs, "Preprocess")
+        layout = self.make_tab_layout(tabs, "Hough")
         self.hough_image_combo = QComboBox()
-        self.hough_image_combo.addItem("Full masked image", "full")
-        self.hough_image_combo.addItem("Center crop", "crop")
+        self.hough_image_combo.addItem("Masked full image", "full")
+        self.hough_image_combo.addItem("Center crop image", "crop")
         self.hough_image_combo.currentTextChanged.connect(self.refresh_hough_preview)
         layout.addWidget(self.hough_image_combo)
 
-        self.hough_debug_check = QCheckBox("Show debug overlay")
+        self.hough_debug_check = QCheckBox("Show Hough debug")
         self.hough_debug_check.toggled.connect(self.refresh_hough_preview)
         layout.addWidget(self.hough_debug_check)
 
         self.hough_crop_size_spin = QSpinBox()
         self.hough_crop_size_spin.setRange(0, 8192)
         self.hough_crop_size_spin.setValue(0)
-        self.hough_crop_size_spin.setSpecialValueText("crop native")
+        self.hough_crop_size_spin.setSpecialValueText("native crop")
         self.hough_crop_size_spin.setSingleStep(128)
-        self.hough_crop_size_spin.setPrefix("crop ")
+        self.hough_crop_size_spin.setPrefix("Crop ")
         self.hough_crop_size_spin.setSuffix(" px")
         self.hough_crop_size_spin.setToolTip("0 keeps the adaptive crop at its native size. Set a pixel value to force resize.")
         layout.addWidget(self.hough_crop_size_spin)
@@ -502,7 +502,7 @@ class PySideSamWindow(QMainWindow):
         self.hough_inner_scale_spin.setSingleStep(0.02)
         self.hough_inner_scale_spin.setDecimals(2)
         self.hough_inner_scale_spin.setValue(0.86)
-        self.hough_inner_scale_spin.setPrefix("inner x")
+        self.hough_inner_scale_spin.setPrefix("Inner x")
         layout.addWidget(self.hough_inner_scale_spin)
 
         self.hough_crop_scale_spin = QDoubleSpinBox()
@@ -510,18 +510,18 @@ class PySideSamWindow(QMainWindow):
         self.hough_crop_scale_spin.setSingleStep(0.02)
         self.hough_crop_scale_spin.setDecimals(2)
         self.hough_crop_scale_spin.setValue(0.55)
-        self.hough_crop_scale_spin.setPrefix("crop x")
+        self.hough_crop_scale_spin.setPrefix("Crop x")
         layout.addWidget(self.hough_crop_scale_spin)
 
-        preview_hough_button = QPushButton("Preview Hough")
+        preview_hough_button = QPushButton("Preview")
         preview_hough_button.clicked.connect(self.preview_hough_preprocess)
 
-        use_hough_button = QPushButton("Use Hough For SAM")
+        use_hough_button = QPushButton("Use For SAM")
         use_hough_button.setProperty("accent", True)
         use_hough_button.clicked.connect(self.apply_hough_to_sam)
         self.add_button_row(layout, preview_hough_button, use_hough_button)
 
-        save_hough_button = QPushButton("Save Hough Result")
+        save_hough_button = QPushButton("Save Hough Image")
         save_hough_button.clicked.connect(self.save_hough_result)
 
         restore_original_button = QPushButton("Restore Original")
@@ -529,12 +529,12 @@ class PySideSamWindow(QMainWindow):
         self.add_button_row(layout, save_hough_button, restore_original_button)
         layout.addStretch(1)
 
-        layout = self.make_tab_layout(tabs, "Export")
-        layout.addWidget(self.section("Class And Export"))
+        layout = self.make_tab_layout(tabs, "Labels")
+        layout.addWidget(self.section("Dataset Export"))
         self.class_spin = QSpinBox()
         self.class_spin.setRange(0, 9999)
         self.class_spin.setValue(0)
-        self.class_spin.setPrefix("class ")
+        self.class_spin.setPrefix("Class ")
         self.class_spin.valueChanged.connect(lambda _value: self.render_canvas())
         layout.addWidget(self.class_spin)
 
@@ -543,10 +543,10 @@ class PySideSamWindow(QMainWindow):
         self.export_combo.setCurrentText("yolo")
         layout.addWidget(self.export_combo)
 
-        self.object_masks_check = QCheckBox("Save object masks")
+        self.object_masks_check = QCheckBox("Save per-object masks")
         layout.addWidget(self.object_masks_check)
 
-        self.yolo_preview_check = QCheckBox("Show YOLO polygons")
+        self.yolo_preview_check = QCheckBox("Preview YOLO polygons")
         self.yolo_preview_check.toggled.connect(lambda _checked: self.render_canvas())
         layout.addWidget(self.yolo_preview_check)
 
@@ -555,7 +555,7 @@ class PySideSamWindow(QMainWindow):
         self.yolo_epsilon_spin.setSingleStep(0.5)
         self.yolo_epsilon_spin.setDecimals(1)
         self.yolo_epsilon_spin.setValue(2.0)
-        self.yolo_epsilon_spin.setPrefix("epsilon ")
+        self.yolo_epsilon_spin.setPrefix("Epsilon ")
         self.yolo_epsilon_spin.valueChanged.connect(self.on_yolo_polygon_settings_changed)
         layout.addWidget(self.yolo_epsilon_spin)
 
@@ -564,11 +564,11 @@ class PySideSamWindow(QMainWindow):
         self.yolo_min_area_spin.setSingleStep(1.0)
         self.yolo_min_area_spin.setDecimals(1)
         self.yolo_min_area_spin.setValue(8.0)
-        self.yolo_min_area_spin.setPrefix("min area ")
+        self.yolo_min_area_spin.setPrefix("Min area ")
         self.yolo_min_area_spin.valueChanged.connect(self.on_yolo_polygon_settings_changed)
         layout.addWidget(self.yolo_min_area_spin)
 
-        self.yolo_preview_label = QLabel("YOLO polygons: off")
+        self.yolo_preview_label = QLabel("Polygon preview: off")
         self.yolo_preview_label.setObjectName("muted")
         layout.addWidget(self.yolo_preview_label)
         layout.addStretch(1)
@@ -583,38 +583,38 @@ class PySideSamWindow(QMainWindow):
         self.objects_list.currentRowChanged.connect(self.on_selected_object_changed)
         layout.addWidget(self.objects_list, 1)
 
-        remove_object = QPushButton("Remove Selected")
+        remove_object = QPushButton("Remove Object")
         remove_object.setProperty("danger", True)
         remove_object.clicked.connect(self.remove_selected_object)
 
-        clear_objects = QPushButton("Clear Objects")
+        clear_objects = QPushButton("Clear All")
         clear_objects.setProperty("danger", True)
         clear_objects.clicked.connect(self.clear_saved_objects)
         self.add_button_row(layout, remove_object, clear_objects)
 
-        layout.addWidget(self.section("Template"))
+        layout.addWidget(self.section("Reuse Template"))
         self.template_status_label = QLabel("Template: none")
         self.template_status_label.setObjectName("muted")
         self.template_status_label.setWordWrap(True)
         layout.addWidget(self.template_status_label)
 
-        save_template = QPushButton("Save Template")
+        save_template = QPushButton("Capture Template")
         save_template.clicked.connect(self.save_mask_template)
         apply_template = QPushButton("Apply Template")
         apply_template.setProperty("accent", True)
         apply_template.clicked.connect(self.apply_mask_template)
         self.add_button_row(layout, save_template, apply_template)
 
-        layout = self.make_tab_layout(tabs, "Polygon")
-        layout.addWidget(self.section("YOLO Polygon Edit"))
-        self.polygon_edit_check = QCheckBox("Edit YOLO polygons")
+        layout = self.make_tab_layout(tabs, "Edit")
+        layout.addWidget(self.section("Mask Editing"))
+        self.polygon_edit_check = QCheckBox("Enable mask editing")
         self.polygon_edit_check.setProperty("toolMode", True)
         self.polygon_edit_check.toggled.connect(self.set_polygon_edit_enabled)
         layout.addWidget(self.polygon_edit_check)
 
         tool_row = QHBoxLayout()
         tool_row.setSpacing(6)
-        self.polygon_mode_button = QPushButton("Polygon Edit")
+        self.polygon_mode_button = QPushButton("Polygon")
         self.polygon_mode_button.setCheckable(True)
         self.polygon_mode_button.setChecked(True)
         self.polygon_mode_button.setProperty("activeAction", True)
@@ -631,45 +631,45 @@ class PySideSamWindow(QMainWindow):
         tool_row.addWidget(self.sam_hole_mode_button)
         layout.addLayout(tool_row)
 
-        self.whole_mask_drag_check = QCheckBox("Drag selected mask/polygon")
+        self.whole_mask_drag_check = QCheckBox("Move whole target")
         self.whole_mask_drag_check.setProperty("toolMode", True)
         self.whole_mask_drag_check.setToolTip("Drag the active SAM mask or the selected saved object as one piece. Shift-drag also works.")
         layout.addWidget(self.whole_mask_drag_check)
 
         self.move_target_combo = QComboBox()
         self.move_target_combo.addItem("Move target: auto", "auto")
-        self.move_target_combo.addItem("Move target: active SAM mask", "current")
+        self.move_target_combo.addItem("Move target: active mask", "current")
         self.move_target_combo.addItem("Move target: selected object", "object")
         layout.addWidget(self.move_target_combo)
 
         self.draft_polygon_combo = QComboBox()
-        self.draft_polygon_combo.addItem("Add YOLO polygon", "add")
-        self.draft_polygon_combo.addItem("Cut mask hole", "subtract")
+        self.draft_polygon_combo.addItem("Draw add region", "add")
+        self.draft_polygon_combo.addItem("Draw cut hole", "subtract")
         layout.addWidget(self.draft_polygon_combo)
 
-        self.new_polygon_button = QPushButton("New YOLO Polygon")
+        self.new_polygon_button = QPushButton("Draw Polygon")
         self.new_polygon_button.setCheckable(True)
         self.new_polygon_button.setProperty("activeAction", True)
         self.new_polygon_button.clicked.connect(self.start_draft_polygon)
 
-        finish_polygon = QPushButton("Finish Polygon")
+        finish_polygon = QPushButton("Finish")
         finish_polygon.clicked.connect(self.finish_draft_polygon)
 
-        cancel_polygon = QPushButton("Cancel Polygon")
+        cancel_polygon = QPushButton("Cancel")
         cancel_polygon.clicked.connect(self.cancel_draft_polygon)
         self.add_button_row(layout, self.new_polygon_button, finish_polygon)
-        undo_draft = QPushButton("Undo Draft Point")
+        undo_draft = QPushButton("Undo Draw Point")
         undo_draft.clicked.connect(self.undo_draft_polygon_point)
         self.add_button_row(layout, cancel_polygon, undo_draft)
 
-        sam_hole = QPushButton("Convert Active SAM Mask To Hole")
+        sam_hole = QPushButton("Active Mask -> Hole")
         sam_hole.clicked.connect(self.subtract_current_sam_mask_from_selected_object)
         layout.addWidget(sam_hole)
 
-        delete_vertex = QPushButton("Delete Selected Vertex")
+        delete_vertex = QPushButton("Delete Vertex")
         delete_vertex.setProperty("danger", True)
         delete_vertex.clicked.connect(self.delete_selected_vertex)
-        delete_polygon = QPushButton("Delete Selected Polygon")
+        delete_polygon = QPushButton("Delete Polygon")
         delete_polygon.setProperty("danger", True)
         delete_polygon.clicked.connect(self.delete_selected_polygon)
         self.add_button_row(layout, delete_vertex, delete_polygon)
@@ -683,8 +683,8 @@ class PySideSamWindow(QMainWindow):
     def make_panel(self) -> QFrame:
         frame = QFrame()
         frame.setObjectName("panel")
-        frame.setMinimumWidth(240)
-        frame.setMaximumWidth(420)
+        frame.setMinimumWidth(280)
+        frame.setMaximumWidth(460)
         frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         return frame
 
@@ -735,7 +735,7 @@ class PySideSamWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "Unsaved annotation",
-            "Discard current unsaved points or accepted masks?",
+            "Discard current unsaved prompts, masks, or objects?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -1436,7 +1436,7 @@ class PySideSamWindow(QMainWindow):
             ],
         }
         self.update_template_status_label()
-        self.set_status("Template saved for this session")
+        self.set_status("Template captured for this session")
 
     def confirm_replace_with_template(self) -> bool:
         has_existing = bool(self.saved_objects or self.points or self.current_mask is not None)
@@ -1445,7 +1445,7 @@ class PySideSamWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "Apply template",
-            "Replace current objects and points with the saved template?",
+            "Replace current objects and prompts with the saved template?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -1898,7 +1898,7 @@ class PySideSamWindow(QMainWindow):
                         self.selected_vertex_index = -1
                         self.draft_polygon_points.clear()
                         self.draft_polygon_active = False
-                        self.set_status(f"Mask score {score:.3f}")
+                        self.set_status(f"Active mask score {score:.3f}")
                         self.render_canvas()
                     if self.pending_prediction or version != self.point_version:
                         self.pending_prediction = False
@@ -2100,7 +2100,7 @@ class PySideSamWindow(QMainWindow):
             self.current_yolo_polygons.clear()
             self.current_yolo_dirty = False
             self.render_canvas()
-            self.set_status("Point removed")
+            self.set_status("Prompt removed")
             return
         self.render_canvas()
         self.predict_current_mask_async()
@@ -2114,7 +2114,7 @@ class PySideSamWindow(QMainWindow):
         self.point_version += 1
         self.pending_prediction = False
         self.render_canvas()
-        self.set_status("Points cleared")
+        self.set_status("Prompts cleared")
 
     @staticmethod
     def clone_yolo_polygons(polygons: Sequence[dict[str, object]]) -> list[dict[str, object]]:
@@ -2247,7 +2247,7 @@ class PySideSamWindow(QMainWindow):
         self.dirty = True
         self.update_object_list()
         self.objects_list.setCurrentRow(len(self.saved_objects) - 1)
-        self.set_status(f"Accepted {saved.name}")
+        self.set_status(f"Added {saved.name}")
 
     def remove_selected_object(self) -> None:
         row = self.objects_list.currentRow()
@@ -2394,7 +2394,7 @@ class PySideSamWindow(QMainWindow):
             if hasattr(self, "new_polygon_button"):
                 self.new_polygon_button.setChecked(False)
         self.render_canvas()
-        self.set_status("YOLO polygon edit mode" if enabled else "Point mode")
+        self.set_status("Mask editing enabled" if enabled else "Prompt mode")
 
     def set_polygon_tool_mode(self, mode: str) -> None:
         if mode == "sam_hole":
@@ -2404,11 +2404,11 @@ class PySideSamWindow(QMainWindow):
             self.polygon_edit_check.setChecked(True)
             if self.current_mask is None and self.selected_object_index() < 0 and self.saved_objects:
                 self.objects_list.setCurrentRow(0)
-            self.set_status("SAM hole mode: click inside the target mask")
+            self.set_status("SAM hole tool: click inside the target mask")
             return
         self.polygon_mode_button.setChecked(True)
         self.polygon_edit_check.setChecked(True)
-        self.set_status("Polygon edit mode")
+        self.set_status("Polygon tool")
 
     def sam_hole_mode_enabled(self) -> bool:
         return bool(
@@ -2590,7 +2590,7 @@ class PySideSamWindow(QMainWindow):
         self.draft_polygon_points.clear()
         self.draft_polygon_active = True
         self.new_polygon_button.setChecked(True)
-        self.set_status("Draft polygon started")
+        self.set_status("Drawing polygon")
         self.render_canvas()
 
     def undo_draft_polygon_point(self) -> None:
@@ -2599,14 +2599,14 @@ class PySideSamWindow(QMainWindow):
             return
         self.draft_polygon_points.pop()
         self.render_canvas()
-        self.set_status(f"Draft polygon: {len(self.draft_polygon_points)} point(s)")
+        self.set_status(f"Drawing polygon: {len(self.draft_polygon_points)} point(s)")
 
     def finish_draft_polygon(self) -> None:
         target_index = self.active_polygon_target_index()
         if target_index is None or not self.draft_polygon_active:
             return
         if len(self.draft_polygon_points) < 3:
-            self.set_status("Draft polygon needs at least 3 points")
+            self.set_status("Polygon needs at least 3 points")
             return
         mode = str(self.draft_polygon_combo.currentData() or "add")
         self.push_undo_state("add polygon")
@@ -2622,14 +2622,14 @@ class PySideSamWindow(QMainWindow):
         self.rebuild_target_mask_from_polygons(target_index)
         self.update_object_list()
         self.render_canvas()
-        self.set_status("Polygon added")
+        self.set_status("Polygon applied")
 
     def cancel_draft_polygon(self) -> None:
         self.draft_polygon_points.clear()
         self.draft_polygon_active = False
         self.new_polygon_button.setChecked(False)
         self.render_canvas()
-        self.set_status("Draft polygon canceled")
+        self.set_status("Polygon drawing canceled")
 
     def delete_selected_vertex(self) -> None:
         target_index = self.active_polygon_target_index()
@@ -2748,7 +2748,7 @@ class PySideSamWindow(QMainWindow):
             if event_type == "press" and button == Qt.LeftButton:
                 self.predict_sam_hole_async(x, y)
             elif event_type == "press" and button == Qt.RightButton:
-                self.set_status("SAM hole mode uses left-click inside the target mask")
+                self.set_status("SAM hole tool uses left-click inside the target mask")
             return
         if self.draft_polygon_active:
             if target_index is None or not self.ensure_polygons_for_target(target_index):
@@ -2756,7 +2756,7 @@ class PySideSamWindow(QMainWindow):
                 return
             if event_type == "press" and button == Qt.LeftButton:
                 self.draft_polygon_points.append((x, y))
-                self.set_status(f"Draft polygon: {len(self.draft_polygon_points)} point(s)")
+                self.set_status(f"Drawing polygon: {len(self.draft_polygon_points)} point(s)")
                 self.render_canvas()
                 return
             if event_type == "press" and button == Qt.RightButton:
@@ -2786,7 +2786,7 @@ class PySideSamWindow(QMainWindow):
                 self.selected_polygon_index = -1
                 self.selected_vertex_index = -1
                 self.render_canvas()
-                self.set_status("Dragging selected mask/object")
+                self.set_status("Dragging target")
                 return
 
         if event_type == "move" and self.edit_move_target is not None:
@@ -2804,7 +2804,7 @@ class PySideSamWindow(QMainWindow):
             self.rebuild_target_mask_from_polygons(move_target_index)
             self.update_object_list()
             self.render_canvas()
-            self.set_status("Mask/object moved")
+            self.set_status("Target moved")
             self.edit_move_target = None
             return
 
@@ -2994,7 +2994,7 @@ class PySideSamWindow(QMainWindow):
             self.overlay_cache = None
             self.canvas.set_overlay(None, [])
             if hasattr(self, "yolo_preview_label"):
-                self.yolo_preview_label.setText("YOLO polygons: off")
+                self.yolo_preview_label.setText("Polygon preview: off")
             return
         if hasattr(self, "polygon_edit_check") and self.polygon_edit_check.isChecked():
             overlay = self.cached_interactive_overlay()
@@ -3010,7 +3010,7 @@ class PySideSamWindow(QMainWindow):
                 current_color=self.current_color,
             )
             total_polygons = len(self.current_yolo_polygons) + sum(len(saved.yolo_polygons) for saved in self.saved_objects)
-            self.yolo_preview_label.setText(f"Editable YOLO polygons: {total_polygons}")
+            self.yolo_preview_label.setText(f"Editable polygons: {total_polygons}")
         elif self.yolo_preview_check.isChecked():
             overlay, polygon_count = render_yolo_polygon_overlay(
                 self.image_np,
@@ -3025,7 +3025,7 @@ class PySideSamWindow(QMainWindow):
             self.yolo_preview_label.setText(f"YOLO polygons: {polygon_count}")
         else:
             overlay = self.cached_interactive_overlay()
-            self.yolo_preview_label.setText("YOLO polygons: off")
+            self.yolo_preview_label.setText("Polygon preview: off")
         show_prompt_points = not (hasattr(self, "polygon_edit_check") and self.polygon_edit_check.isChecked())
         self.canvas.set_overlay(overlay, self.points if show_prompt_points else [])
         if fit:
@@ -3034,7 +3034,7 @@ class PySideSamWindow(QMainWindow):
 
 def apply_style(app: QApplication) -> None:
     families = set(QFontDatabase.families())
-    for family in ("Noto Sans TC", "Source Han Sans TC", "Noto Sans CJK TC", "Microsoft JhengHei UI", "Segoe UI"):
+    for family in ("Segoe UI", "Microsoft JhengHei UI", "Noto Sans TC", "Source Han Sans TC", "Noto Sans CJK TC"):
         if family in families:
             app.setFont(QFont(family, 10))
             break
@@ -3044,7 +3044,7 @@ def apply_style(app: QApplication) -> None:
         QWidget {
             background: #f6f8fb;
             color: #1f2937;
-            font-family: "Noto Sans TC", "Source Han Sans TC", "Microsoft JhengHei UI", "Segoe UI";
+            font-family: "Segoe UI", "Microsoft JhengHei UI", "Noto Sans TC", "Source Han Sans TC";
             font-size: 10pt;
         }
         QMainWindow, QToolBar { background: #f6f8fb; }
