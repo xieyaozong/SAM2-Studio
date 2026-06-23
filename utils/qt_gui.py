@@ -249,6 +249,9 @@ class PySideSamWindow(QMainWindow):
         self.pending_template: dict[str, object] | None = None
         self.mask_template: dict[str, object] | None = None
         self.edit_drag_target: tuple[int, int, int] | None = None
+        self.edit_move_target: tuple[int, float, float] | None = None
+        self.edit_undo_stack: list[dict[str, object]] = []
+        self.edit_undo_limit = 25
         self.selected_polygon_index = -1
         self.selected_vertex_index = -1
         self.draft_polygon_points: list[tuple[float, float]] = []
@@ -603,8 +606,20 @@ class PySideSamWindow(QMainWindow):
         layout = self.make_tab_layout(tabs, "Polygon")
         layout.addWidget(self.section("YOLO Polygon Edit"))
         self.polygon_edit_check = QCheckBox("Edit YOLO polygons")
+        self.polygon_edit_check.setProperty("toolMode", True)
         self.polygon_edit_check.toggled.connect(self.set_polygon_edit_enabled)
         layout.addWidget(self.polygon_edit_check)
+
+        self.whole_mask_drag_check = QCheckBox("Drag selected mask/polygon")
+        self.whole_mask_drag_check.setProperty("toolMode", True)
+        self.whole_mask_drag_check.setToolTip("Drag the active SAM mask or the selected saved object as one piece. Shift-drag also works.")
+        layout.addWidget(self.whole_mask_drag_check)
+
+        self.move_target_combo = QComboBox()
+        self.move_target_combo.addItem("Move target: auto", "auto")
+        self.move_target_combo.addItem("Move target: active SAM mask", "current")
+        self.move_target_combo.addItem("Move target: selected object", "object")
+        layout.addWidget(self.move_target_combo)
 
         self.draft_polygon_combo = QComboBox()
         self.draft_polygon_combo.addItem("Add YOLO polygon", "add")
@@ -622,12 +637,27 @@ class PySideSamWindow(QMainWindow):
         cancel_polygon = QPushButton("Cancel Polygon")
         cancel_polygon.clicked.connect(self.cancel_draft_polygon)
         self.add_button_row(layout, self.new_polygon_button, finish_polygon)
-        layout.addWidget(cancel_polygon)
+        undo_draft = QPushButton("Undo Draft Point")
+        undo_draft.clicked.connect(self.undo_draft_polygon_point)
+        self.add_button_row(layout, cancel_polygon, undo_draft)
+
+        sam_hole = QPushButton("SAM Mask -> Hole")
+        sam_hole.setProperty("accent", True)
+        sam_hole.clicked.connect(self.subtract_current_sam_mask_from_selected_object)
+        layout.addWidget(sam_hole)
 
         delete_vertex = QPushButton("Delete Selected Vertex")
         delete_vertex.setProperty("danger", True)
         delete_vertex.clicked.connect(self.delete_selected_vertex)
-        layout.addWidget(delete_vertex)
+        delete_polygon = QPushButton("Delete Selected Polygon")
+        delete_polygon.setProperty("danger", True)
+        delete_polygon.clicked.connect(self.delete_selected_polygon)
+        self.add_button_row(layout, delete_vertex, delete_polygon)
+
+        self.undo_edit_button = QPushButton("Undo Edit")
+        self.undo_edit_button.clicked.connect(self.undo_edit)
+        self.undo_edit_button.setEnabled(False)
+        layout.addWidget(self.undo_edit_button)
         layout.addStretch(1)
 
     def make_panel(self) -> QFrame:
@@ -648,7 +678,7 @@ class PySideSamWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Shift+O"), self, activated=self.open_folder)
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self.save_results)
         QShortcut(QKeySequence("Ctrl+N"), self, activated=self.save_and_next)
-        QShortcut(QKeySequence("Ctrl+Z"), self, activated=self.undo_point)
+        QShortcut(QKeySequence("Ctrl+Z"), self, activated=self.undo_edit)
         QShortcut(QKeySequence("F"), self, activated=self.canvas_fit)
         QShortcut(QKeySequence("A"), self, activated=lambda: self.add_button.setChecked(True))
         QShortcut(QKeySequence("R"), self, activated=lambda: self.remove_button.setChecked(True))
@@ -1215,6 +1245,7 @@ class PySideSamWindow(QMainWindow):
         self.current_yolo_polygons.clear()
         self.current_yolo_dirty = False
         self.edit_drag_target = None
+        self.edit_move_target = None
         self.selected_polygon_index = -1
         self.selected_vertex_index = -1
         self.draft_polygon_points.clear()
@@ -1224,6 +1255,7 @@ class PySideSamWindow(QMainWindow):
         self.image_ready = False
         self.dirty = False
         self.point_version += 1
+        self.clear_edit_undo_stack()
         self.update_object_list()
 
     def hough_settings(self) -> HoughPreprocessSettings:
@@ -1418,6 +1450,8 @@ class PySideSamWindow(QMainWindow):
         if not objects:
             self.set_status("Template had no usable polygons for this image")
             return False
+        if self.saved_objects or self.points or self.current_mask is not None:
+            self.push_undo_state("apply template")
         self.points.clear()
         self.current_mask = None
         self.current_score = 0.0
@@ -1425,6 +1459,7 @@ class PySideSamWindow(QMainWindow):
         self.current_yolo_dirty = False
         self.saved_objects = objects
         self.edit_drag_target = None
+        self.edit_move_target = None
         self.selected_polygon_index = -1
         self.selected_vertex_index = -1
         self.draft_polygon_points.clear()
@@ -1434,6 +1469,8 @@ class PySideSamWindow(QMainWindow):
         self.dirty = True
         self.point_version += 1
         self.update_object_list()
+        if hasattr(self, "polygon_edit_check") and self.saved_objects:
+            self.polygon_edit_check.setChecked(True)
         self.render_canvas(fit=True)
         self.set_status(f"Template applied: {len(objects)} object(s)")
         return True
@@ -1607,7 +1644,19 @@ class PySideSamWindow(QMainWindow):
             return
         self.set_status(f"Saved Hough result: {outputs['full']}")
 
+    def sync_polygon_edit_mode_after_load(self, restored: bool, was_polygon_editing: bool) -> None:
+        if not hasattr(self, "polygon_edit_check"):
+            return
+        has_labels = bool(restored and self.saved_objects)
+        if has_labels and was_polygon_editing:
+            self.polygon_edit_check.setChecked(True)
+        elif not has_labels:
+            self.polygon_edit_check.setChecked(False)
+
     def load_image_path(self, path: Path) -> None:
+        was_polygon_editing = bool(
+            self.polygon_edit_check.isChecked() if hasattr(self, "polygon_edit_check") else False
+        )
         try:
             self.image_path = path
             self.original_image_np = load_rgb_image(path)
@@ -1622,6 +1671,7 @@ class PySideSamWindow(QMainWindow):
 
         self.reset_annotation_state()
         restored = self.restore_existing_annotation_for_current_image()
+        self.sync_polygon_edit_mode_after_load(restored, was_polygon_editing)
         self.render_canvas(fit=True)
         self.update_image_counter()
         self.setWindowTitle(f"SAM 2 Studio - {path.name}")
@@ -1970,10 +2020,118 @@ class PySideSamWindow(QMainWindow):
         self.render_canvas()
         self.set_status("Points cleared")
 
+    @staticmethod
+    def clone_yolo_polygons(polygons: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+        cloned: list[dict[str, object]] = []
+        for item in polygons:
+            mode = str(item.get("mode", "add"))
+            if mode not in {"add", "subtract"}:
+                mode = "add"
+            points = []
+            for raw_point in item.get("points", []):  # type: ignore[union-attr]
+                try:
+                    x, y = raw_point  # type: ignore[misc]
+                    points.append((float(x), float(y)))
+                except Exception:
+                    continue
+            if len(points) >= 3:
+                cloned.append({"mode": mode, "points": points})
+        return cloned
+
+    def clone_saved_objects(self, saved_objects: Sequence[SavedObject]) -> list[SavedObject]:
+        return [
+            SavedObject(
+                name=saved.name,
+                mask=saved.mask.copy(),
+                color=saved.color.copy(),
+                score=float(saved.score),
+                class_id=int(saved.class_id),
+                yolo_polygons=self.clone_yolo_polygons(saved.yolo_polygons),
+            )
+            for saved in saved_objects
+        ]
+
+    def annotation_snapshot(self, label: str) -> dict[str, object]:
+        return {
+            "label": label,
+            "points": list(self.points),
+            "current_mask": None if self.current_mask is None else self.current_mask.copy(),
+            "current_score": float(self.current_score),
+            "current_yolo_polygons": self.clone_yolo_polygons(self.current_yolo_polygons),
+            "current_yolo_dirty": bool(self.current_yolo_dirty),
+            "saved_objects": self.clone_saved_objects(self.saved_objects),
+            "selected_object_row": self.objects_list.currentRow() if hasattr(self, "objects_list") else -1,
+            "selected_polygon_index": int(self.selected_polygon_index),
+            "selected_vertex_index": int(self.selected_vertex_index),
+            "draft_polygon_points": list(self.draft_polygon_points),
+            "draft_polygon_active": bool(self.draft_polygon_active),
+            "new_polygon_checked": bool(
+                self.new_polygon_button.isChecked() if hasattr(self, "new_polygon_button") else False
+            ),
+            "dirty": bool(self.dirty),
+        }
+
+    def update_undo_button_state(self) -> None:
+        if hasattr(self, "undo_edit_button"):
+            self.undo_edit_button.setEnabled(bool(self.edit_undo_stack))
+
+    def clear_edit_undo_stack(self) -> None:
+        self.edit_undo_stack.clear()
+        self.update_undo_button_state()
+
+    def push_undo_state(self, label: str) -> None:
+        if self.image_np is None:
+            return
+        self.edit_undo_stack.append(self.annotation_snapshot(label))
+        if len(self.edit_undo_stack) > self.edit_undo_limit:
+            del self.edit_undo_stack[0 : len(self.edit_undo_stack) - self.edit_undo_limit]
+        self.update_undo_button_state()
+
+    def undo_edit(self) -> None:
+        if not self.edit_undo_stack:
+            if self.points:
+                self.undo_point()
+                return
+            self.set_status("No edit to undo")
+            return
+        snapshot = self.edit_undo_stack.pop()
+        self.points = list(snapshot.get("points", []))  # type: ignore[arg-type]
+        mask = snapshot.get("current_mask")
+        self.current_mask = None if mask is None else np.asarray(mask, dtype=bool).copy()
+        self.current_score = float(snapshot.get("current_score") or 0.0)
+        self.current_yolo_polygons = self.clone_yolo_polygons(
+            snapshot.get("current_yolo_polygons", [])  # type: ignore[arg-type]
+        )
+        self.current_yolo_dirty = bool(snapshot.get("current_yolo_dirty", False))
+        self.saved_objects = self.clone_saved_objects(
+            snapshot.get("saved_objects", [])  # type: ignore[arg-type]
+        )
+        self.edit_drag_target = None
+        self.edit_move_target = None
+        self.selected_polygon_index = int(snapshot.get("selected_polygon_index", -1))
+        self.selected_vertex_index = int(snapshot.get("selected_vertex_index", -1))
+        self.draft_polygon_points = list(snapshot.get("draft_polygon_points", []))  # type: ignore[arg-type]
+        self.draft_polygon_active = bool(snapshot.get("draft_polygon_active", False))
+        if hasattr(self, "new_polygon_button"):
+            self.new_polygon_button.setChecked(bool(snapshot.get("new_polygon_checked", False)))
+        self.dirty = bool(snapshot.get("dirty", True))
+        self.point_version += 1
+        self.pending_prediction = False
+        self.update_object_list()
+        row = int(snapshot.get("selected_object_row", -1))
+        if self.saved_objects and 0 <= row < len(self.saved_objects):
+            self.objects_list.setCurrentRow(row)
+        self.selected_polygon_index = int(snapshot.get("selected_polygon_index", -1))
+        self.selected_vertex_index = int(snapshot.get("selected_vertex_index", -1))
+        self.update_undo_button_state()
+        self.render_canvas()
+        self.set_status(f"Undid {snapshot.get('label', 'edit')}")
+
     def accept_current_mask(self) -> None:
         if self.current_mask is None:
             self.set_status("No active mask")
             return
+        self.push_undo_state("accept mask")
         yolo_polygons = self.current_yolo_polygons or mask_to_yolo_edit_polygons(
             self.current_mask,
             epsilon=float(self.yolo_epsilon_spin.value()),
@@ -1999,8 +2157,10 @@ class PySideSamWindow(QMainWindow):
         row = self.objects_list.currentRow()
         if row < 0:
             return
+        self.push_undo_state("remove object")
         del self.saved_objects[row]
         self.edit_drag_target = None
+        self.edit_move_target = None
         self.selected_polygon_index = -1
         self.selected_vertex_index = -1
         self.dirty = True
@@ -2013,8 +2173,10 @@ class PySideSamWindow(QMainWindow):
             return
         if QMessageBox.question(self, "Clear objects", "Clear all saved objects?") != QMessageBox.Yes:
             return
+        self.push_undo_state("clear objects")
         self.saved_objects.clear()
         self.edit_drag_target = None
+        self.edit_move_target = None
         self.selected_polygon_index = -1
         self.selected_vertex_index = -1
         self.dirty = True
@@ -2024,6 +2186,7 @@ class PySideSamWindow(QMainWindow):
 
     def on_selected_object_changed(self, _row: int) -> None:
         self.edit_drag_target = None
+        self.edit_move_target = None
         self.selected_polygon_index = -1
         self.selected_vertex_index = -1
         self.render_canvas()
@@ -2038,10 +2201,50 @@ class PySideSamWindow(QMainWindow):
         object_index = self.selected_object_index()
         return object_index if object_index >= 0 else None
 
+    def selected_move_target_index(self) -> int | None:
+        mode = str(self.move_target_combo.currentData() if hasattr(self, "move_target_combo") else "auto")
+        if mode == "current":
+            return -1 if self.current_mask is not None else None
+        if mode == "object":
+            object_index = self.selected_object_index()
+            return object_index if object_index >= 0 else None
+        return self.active_polygon_target_index()
+
+    def rendered_polygon_target_index(self) -> int:
+        if hasattr(self, "whole_mask_drag_check") and self.whole_mask_drag_check.isChecked():
+            move_target_index = self.selected_move_target_index()
+            if move_target_index is not None:
+                return move_target_index
+        target_index = self.active_polygon_target_index()
+        return target_index if target_index is not None else -2
+
     def polygons_for_target(self, target_index: int) -> list[dict[str, object]]:
         if target_index == -1:
             return self.current_yolo_polygons
         return self.saved_objects[target_index].yolo_polygons
+
+    def mask_for_target(self, target_index: int) -> np.ndarray | None:
+        if target_index == -1:
+            return self.current_mask
+        if 0 <= target_index < len(self.saved_objects):
+            return self.saved_objects[target_index].mask
+        return None
+
+    def ensure_polygons_for_target(self, target_index: int) -> bool:
+        polygons = self.polygons_for_target(target_index)
+        if polygons:
+            return True
+        mask = self.mask_for_target(target_index)
+        if mask is None or not mask.any():
+            return False
+        polygons.extend(
+            mask_to_yolo_edit_polygons(
+                mask,
+                epsilon=float(self.yolo_epsilon_spin.value()),
+                min_area=float(self.yolo_min_area_spin.value()),
+            )
+        )
+        return bool(polygons)
 
     def rebuild_target_mask_from_polygons(self, target_index: int) -> None:
         if self.image_np is None:
@@ -2072,12 +2275,39 @@ class PySideSamWindow(QMainWindow):
             self.objects_list.setCurrentRow(0)
         if not enabled:
             self.edit_drag_target = None
+            self.edit_move_target = None
             self.draft_polygon_points.clear()
             self.draft_polygon_active = False
             if hasattr(self, "new_polygon_button"):
                 self.new_polygon_button.setChecked(False)
         self.render_canvas()
         self.set_status("YOLO polygon edit mode" if enabled else "Point mode")
+
+    def target_contains_point(self, target_index: int, x: float, y: float) -> bool:
+        mask = self.mask_for_target(target_index)
+        if mask is None:
+            return False
+        col = int(round(x))
+        row = int(round(y))
+        if row < 0 or col < 0 or row >= mask.shape[0] or col >= mask.shape[1]:
+            return False
+        return bool(mask[row, col])
+
+    def translate_target_polygons(self, target_index: int, dx: float, dy: float) -> None:
+        for item in self.polygons_for_target(target_index):
+            translated = []
+            for raw_point in item.get("points", []):  # type: ignore[union-attr]
+                try:
+                    px, py = raw_point  # type: ignore[misc]
+                except Exception:
+                    continue
+                translated.append((float(px) + dx, float(py) + dy))
+            item["points"] = translated
+        self.selected_vertex_index = -1
+        if target_index == -1:
+            self.current_yolo_dirty = True
+        else:
+            self.dirty = True
 
     def polygon_hit_threshold(self) -> float:
         transform = self.canvas.transform()
@@ -2145,6 +2375,7 @@ class PySideSamWindow(QMainWindow):
             return None
         if insert_index > len(points):
             insert_index = len(points)
+        self.push_undo_state("insert vertex")
         points.insert(insert_index, (x, y))  # type: ignore[attr-defined]
         self.selected_polygon_index = polygon_index
         self.selected_vertex_index = insert_index
@@ -2154,6 +2385,22 @@ class PySideSamWindow(QMainWindow):
         self.render_canvas()
         return target_index, polygon_index, insert_index
 
+    def delete_polygon(self, target_index: int, polygon_index: int, *, push_undo: bool = True) -> bool:
+        polygons = self.polygons_for_target(target_index)
+        if not (0 <= polygon_index < len(polygons)):
+            return False
+        if push_undo:
+            self.push_undo_state("delete polygon")
+        del polygons[polygon_index]
+        self.selected_polygon_index = -1
+        self.selected_vertex_index = -1
+        self.edit_drag_target = None
+        self.edit_move_target = None
+        self.rebuild_target_mask_from_polygons(target_index)
+        self.update_object_list()
+        self.render_canvas()
+        return True
+
     def delete_vertex(self, target_index: int, polygon_index: int, vertex_index: int) -> bool:
         polygons = self.polygons_for_target(target_index)
         if not (0 <= polygon_index < len(polygons)):
@@ -2161,9 +2408,12 @@ class PySideSamWindow(QMainWindow):
         points = polygons[polygon_index].get("points", [])
         if not (0 <= vertex_index < len(points)):
             return False
+        self.push_undo_state("delete vertex")
         if len(points) <= 3:
-            self.set_status("Polygon needs at least 3 vertices")
-            return False
+            removed = self.delete_polygon(target_index, polygon_index, push_undo=False)
+            if removed:
+                self.set_status("Polygon removed")
+            return removed
         del points[vertex_index]  # type: ignore[index]
         self.selected_polygon_index = polygon_index
         self.selected_vertex_index = -1
@@ -2207,6 +2457,14 @@ class PySideSamWindow(QMainWindow):
         self.set_status("Draft polygon started")
         self.render_canvas()
 
+    def undo_draft_polygon_point(self) -> None:
+        if not self.draft_polygon_active or not self.draft_polygon_points:
+            self.set_status("No draft point to undo")
+            return
+        self.draft_polygon_points.pop()
+        self.render_canvas()
+        self.set_status(f"Draft polygon: {len(self.draft_polygon_points)} point(s)")
+
     def finish_draft_polygon(self) -> None:
         target_index = self.active_polygon_target_index()
         if target_index is None or not self.draft_polygon_active:
@@ -2215,6 +2473,7 @@ class PySideSamWindow(QMainWindow):
             self.set_status("Draft polygon needs at least 3 points")
             return
         mode = str(self.draft_polygon_combo.currentData() or "add")
+        self.push_undo_state("add polygon")
         polygons = self.polygons_for_target(target_index)
         polygons.append(
             {"mode": mode, "points": [(float(x), float(y)) for x, y in self.draft_polygon_points]}
@@ -2244,19 +2503,139 @@ class PySideSamWindow(QMainWindow):
         if self.delete_vertex(target_index, self.selected_polygon_index, self.selected_vertex_index):
             self.set_status("Vertex deleted")
 
+    def delete_selected_polygon(self) -> None:
+        target_index = self.active_polygon_target_index()
+        if target_index is None or self.selected_polygon_index < 0:
+            self.set_status("No polygon selected")
+            return
+        if self.delete_polygon(target_index, self.selected_polygon_index):
+            self.set_status("Polygon deleted")
+
+    def subtract_current_sam_mask_from_selected_object(self) -> None:
+        if self.current_mask is None:
+            self.set_status("Create a SAM2 mask for the hole first")
+            return
+        object_index = self.selected_object_index()
+        if object_index < 0 and len(self.saved_objects) == 1:
+            self.objects_list.setCurrentRow(0)
+            object_index = 0
+        if object_index < 0:
+            self.set_status("Select the saved object to cut from")
+            return
+        target_polygons = self.saved_objects[object_index].yolo_polygons
+        base_polygons: list[dict[str, object]] = []
+        if not target_polygons:
+            base_polygons = mask_to_yolo_edit_polygons(
+                self.saved_objects[object_index].mask,
+                epsilon=float(self.yolo_epsilon_spin.value()),
+                min_area=float(self.yolo_min_area_spin.value()),
+            )
+            if not base_polygons:
+                self.set_status("Selected object has no editable polygon")
+                return
+        hole_polygons = mask_to_yolo_edit_polygons(
+            self.current_mask,
+            epsilon=float(self.yolo_epsilon_spin.value()),
+            min_area=float(self.yolo_min_area_spin.value()),
+        )
+        if not hole_polygons:
+            self.set_status("SAM mask had no usable polygon")
+            return
+        self.push_undo_state("SAM hole")
+        target_polygons.extend(self.clone_yolo_polygons(base_polygons))
+        first_new_index = len(target_polygons)
+        for item in hole_polygons:
+            target_polygons.append(
+                {
+                    "mode": "subtract",
+                    "points": [(float(x), float(y)) for x, y in item.get("points", [])],  # type: ignore[misc]
+                }
+            )
+        self.points.clear()
+        self.current_mask = None
+        self.current_score = 0.0
+        self.current_yolo_polygons.clear()
+        self.current_yolo_dirty = False
+        self.point_version += 1
+        self.selected_polygon_index = first_new_index
+        self.selected_vertex_index = -1
+        self.edit_drag_target = None
+        self.edit_move_target = None
+        self.rebuild_target_mask_from_polygons(object_index)
+        self.update_object_list()
+        self.objects_list.setCurrentRow(object_index)
+        self.polygon_edit_check.setChecked(True)
+        self.render_canvas()
+        self.set_status(f"Cut {len(hole_polygons)} SAM hole polygon(s)")
+
     def handle_polygon_edit_event(self, event_type, x: float, y: float, button, modifiers) -> None:
         target_index = self.active_polygon_target_index()
-        if self.image_np is None or target_index is None:
-            self.set_status("Create a SAM2 mask first or select an object")
+        if self.image_np is None:
+            self.set_status("Open an image first")
             return
         if self.draft_polygon_active:
+            if target_index is None or not self.ensure_polygons_for_target(target_index):
+                self.set_status("Create a SAM2 mask first or select an object")
+                return
             if event_type == "press" and button == Qt.LeftButton:
                 self.draft_polygon_points.append((x, y))
+                self.set_status(f"Draft polygon: {len(self.draft_polygon_points)} point(s)")
                 self.render_canvas()
                 return
             if event_type == "press" and button == Qt.RightButton:
                 self.finish_draft_polygon()
                 return
+            return
+
+        if event_type == "press" and button == Qt.LeftButton:
+            move_requested = bool(
+                (hasattr(self, "whole_mask_drag_check") and self.whole_mask_drag_check.isChecked())
+                or (modifiers & Qt.ShiftModifier)
+            )
+            if move_requested:
+                move_target_index = self.selected_move_target_index()
+                if move_target_index is None:
+                    self.set_status("Select a mask/object to drag")
+                    return
+                if not self.ensure_polygons_for_target(move_target_index):
+                    self.set_status("Selected target has no editable polygon")
+                    return
+                if not self.target_contains_point(move_target_index, x, y):
+                    self.set_status("Click inside the selected mask/object to drag it")
+                    return
+                self.push_undo_state("move mask")
+                self.edit_move_target = (move_target_index, x, y)
+                self.edit_drag_target = None
+                self.selected_polygon_index = -1
+                self.selected_vertex_index = -1
+                self.render_canvas()
+                self.set_status("Dragging selected mask/object")
+                return
+
+        if event_type == "move" and self.edit_move_target is not None:
+            move_target_index, last_x, last_y = self.edit_move_target
+            dx = float(x) - float(last_x)
+            dy = float(y) - float(last_y)
+            if dx or dy:
+                self.translate_target_polygons(move_target_index, dx, dy)
+                self.edit_move_target = (move_target_index, x, y)
+                self.render_canvas()
+            return
+
+        if event_type == "release" and self.edit_move_target is not None:
+            move_target_index, _last_x, _last_y = self.edit_move_target
+            self.rebuild_target_mask_from_polygons(move_target_index)
+            self.update_object_list()
+            self.render_canvas()
+            self.set_status("Mask/object moved")
+            self.edit_move_target = None
+            return
+
+        if target_index is None:
+            self.set_status("Create a SAM2 mask first or select an object")
+            return
+        if not self.ensure_polygons_for_target(target_index):
+            self.set_status("No editable polygon for this target")
             return
 
         if event_type == "press" and button == Qt.RightButton:
@@ -2280,6 +2659,7 @@ class PySideSamWindow(QMainWindow):
         if event_type == "press" and button == Qt.LeftButton:
             hit = self.nearest_polygon_vertex(x, y)
             if hit is not None:
+                self.push_undo_state("move vertex")
                 self.edit_drag_target = hit
                 _object_index, polygon_index, vertex_index = hit
                 self.selected_polygon_index = polygon_index
@@ -2444,7 +2824,7 @@ class PySideSamWindow(QMainWindow):
             overlay = render_yolo_edit_polygon_overlay(
                 overlay,
                 self.saved_objects,
-                selected_object_index=self.active_polygon_target_index() if self.active_polygon_target_index() is not None else -2,
+                selected_object_index=self.rendered_polygon_target_index(),
                 selected_polygon_index=self.selected_polygon_index,
                 selected_vertex_index=self.selected_vertex_index,
                 draft_polygon=self.draft_polygon_points,
@@ -2605,6 +2985,16 @@ def apply_style(app: QApplication) -> None:
             color: #334155;
             spacing: 8px;
             padding: 3px 2px;
+        }
+        QCheckBox[toolMode="true"] {
+            background: #f8fafc;
+            border: 1px solid #d9e1ec;
+            border-radius: 6px;
+            padding: 7px 8px;
+        }
+        QCheckBox[toolMode="true"]:checked {
+            background: #d9f3ee;
+            border-color: #0f9f8d;
         }
         QCheckBox:checked {
             color: #0f766e;
