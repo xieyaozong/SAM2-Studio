@@ -211,6 +211,7 @@ class PySideSamWindow(QMainWindow):
         self.image_index = -1
         self.image_folder: Path | None = None
         self.output_dir: Path | None = None
+        self.output_dir_user_selected = False
         self.annotation_index_dir: Path | None = None
         self.annotation_records: list[dict[str, object]] = []
         self.hough_result: HoughPreprocessResult | None = None
@@ -905,12 +906,54 @@ class PySideSamWindow(QMainWindow):
                 score += 40
         return score
 
+    def image_base_stem_is_unique(self, image_path: Path) -> bool:
+        if not self.image_files:
+            return True
+        target = self.base_image_stem(image_path.stem)
+        matches = 0
+        for candidate in self.image_files:
+            if self.base_image_stem(candidate.stem) == target:
+                matches += 1
+                if matches > 1:
+                    return False
+        return True
+
+    def annotation_match_is_reliable(self, record: dict[str, object], image_path: Path) -> bool:
+        image_abs = self.safe_resolve_text(image_path)
+        name = image_path.name.casefold()
+        stem = image_path.stem.casefold()
+        base_stem = self.base_image_stem(stem)
+        source_abs = str(record.get("source_abs") or "")
+        if source_abs and source_abs == image_abs:
+            return True
+
+        image_tokens = self.meaningful_folder_tokens(image_path.parent.parts)
+        record_tokens = record.get("path_tokens")
+        token_match = isinstance(record_tokens, set) and bool(record_tokens.intersection(image_tokens))
+        parent_match = bool(record.get("source_parent") and record.get("source_parent") == image_path.parent.name.casefold())
+        unique_base = self.image_base_stem_is_unique(image_path)
+
+        exact_name_match = (
+            record.get("source_name") == name
+            or record.get("image_name") == name
+            or record.get("source_stem") == stem
+            or record.get("image_stem") == stem
+        )
+        derived_name_match = record.get("source_base_stem") == base_stem or record.get("image_base_stem") == base_stem
+        if exact_name_match:
+            return parent_match or token_match or unique_base
+        if derived_name_match:
+            return parent_match or token_match or unique_base
+        return False
+
     def find_annotation_record_for_image(self, image_path: Path, image_shape=None) -> dict[str, object] | None:
         self.build_annotation_index()
         best: tuple[int, float, dict[str, object]] | None = None
         for record in self.annotation_records:
             score = self.annotation_match_score(record, image_path, image_shape)
             if score < 100:
+                continue
+            if not self.annotation_match_is_reliable(record, image_path):
                 continue
             mtime = float(record.get("mtime") or 0.0)
             if best is None or (score, mtime) > (best[0], best[1]):
@@ -1271,6 +1314,7 @@ class PySideSamWindow(QMainWindow):
             if not selected:
                 return
             self.output_dir = Path(selected)
+            self.output_dir_user_selected = True
             self.update_output_label()
         try:
             outputs = save_hough_preprocess_result(self.image_path, self.output_dir, self.hough_result)
@@ -1318,6 +1362,7 @@ class PySideSamWindow(QMainWindow):
         self.image_folder = None
         if self.output_dir is None:
             self.output_dir = selected.parent / "sam2_interactive_results"
+            self.output_dir_user_selected = False
             self.update_output_label()
         self.load_image_path(selected)
 
@@ -1338,7 +1383,9 @@ class PySideSamWindow(QMainWindow):
             return
         self.image_folder = folder_path
         self.image_files = images
-        self.output_dir = folder_path / "sam2_dataset"
+        if self.output_dir is None or not self.output_dir_user_selected:
+            self.output_dir = folder_path / "sam2_dataset"
+            self.output_dir_user_selected = False
         self.invalidate_annotation_index()
         self.image_index = self.first_unprocessed_image_index()
         self.update_output_label()
@@ -1350,6 +1397,7 @@ class PySideSamWindow(QMainWindow):
         if not selected:
             return
         self.output_dir = Path(selected)
+        self.output_dir_user_selected = True
         self.invalidate_annotation_index()
         self.update_output_label()
         if self.image_files and self.image_folder is not None and not self.has_unsaved_work():
@@ -1991,6 +2039,7 @@ class PySideSamWindow(QMainWindow):
             if not selected:
                 return False
             self.output_dir = Path(selected)
+            self.output_dir_user_selected = True
             self.update_output_label()
         try:
             outputs = save_interactive_results(
