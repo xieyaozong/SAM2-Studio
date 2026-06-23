@@ -2030,7 +2030,10 @@ class PySideSamWindow(QMainWindow):
             points = self.polygons_for_target(target_index)[polygon_index].get("points", [])
             if 0 <= vertex_index < len(points):
                 points[vertex_index] = (x, y)  # type: ignore[index]
-                self.rebuild_target_mask_from_polygons(target_index)
+                if target_index == -1:
+                    self.current_yolo_dirty = True
+                else:
+                    self.dirty = True
                 self.render_canvas()
             return
 
@@ -2039,6 +2042,7 @@ class PySideSamWindow(QMainWindow):
                 target_index, _polygon_index, _vertex_index = self.edit_drag_target
                 self.rebuild_target_mask_from_polygons(target_index)
                 self.update_object_list()
+                self.render_canvas()
                 self.set_status("Polygon updated")
             self.edit_drag_target = None
 
