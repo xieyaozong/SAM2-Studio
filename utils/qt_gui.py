@@ -246,6 +246,8 @@ class PySideSamWindow(QMainWindow):
         self.hough_running = False
         self.hough_action_after_run: str | None = None
         self.hough_requested_output: str | None = None
+        self.pending_template: dict[str, object] | None = None
+        self.mask_template: dict[str, object] | None = None
         self.edit_drag_target: tuple[int, int, int] | None = None
         self.selected_polygon_index = -1
         self.selected_vertex_index = -1
@@ -584,6 +586,19 @@ class PySideSamWindow(QMainWindow):
         clear_objects.setProperty("danger", True)
         clear_objects.clicked.connect(self.clear_saved_objects)
         self.add_button_row(layout, remove_object, clear_objects)
+
+        layout.addWidget(self.section("Template"))
+        self.template_status_label = QLabel("Template: none")
+        self.template_status_label.setObjectName("muted")
+        self.template_status_label.setWordWrap(True)
+        layout.addWidget(self.template_status_label)
+
+        save_template = QPushButton("Save Template")
+        save_template.clicked.connect(self.save_mask_template)
+        apply_template = QPushButton("Apply Template")
+        apply_template.setProperty("accent", True)
+        apply_template.clicked.connect(self.apply_mask_template)
+        self.add_button_row(layout, save_template, apply_template)
 
         layout = self.make_tab_layout(tabs, "Polygon")
         layout.addWidget(self.section("YOLO Polygon Edit"))
@@ -1233,6 +1248,228 @@ class PySideSamWindow(QMainWindow):
     def selected_hough_output(self) -> str:
         return str(self.hough_image_combo.currentData() or "full")
 
+    def working_hough_variant(self) -> str | None:
+        if self.image_path is None or not self.working_image_name:
+            return None
+        stem = Path(self.working_image_name).stem
+        prefix = f"{self.image_path.stem}_hough_"
+        if stem.startswith(prefix):
+            variant = stem[len(prefix):]
+            if variant in {"full", "crop", "mask", "debug"}:
+                return variant
+        return None
+
+    def current_hough_settings_payload(self) -> dict[str, float | int]:
+        return {
+            "inner_radius_scale": float(self.hough_inner_scale_spin.value()),
+            "crop_radius_scale": float(self.hough_crop_scale_spin.value()),
+            "crop_size": int(self.hough_crop_size_spin.value()),
+        }
+
+    @staticmethod
+    def hough_settings_from_payload(payload: dict[str, object] | None) -> HoughPreprocessSettings:
+        payload = payload if isinstance(payload, dict) else {}
+        return HoughPreprocessSettings(
+            inner_radius_scale=float(payload.get("inner_radius_scale", 0.86)),
+            crop_radius_scale=float(payload.get("crop_radius_scale", 0.55)),
+            crop_size=int(payload.get("crop_size", 0)),
+        )
+
+    @staticmethod
+    def clone_template_polygons(polygons: Sequence[dict[str, object]], scale_x: float, scale_y: float) -> list[dict[str, object]]:
+        cloned: list[dict[str, object]] = []
+        for item in polygons:
+            mode = str(item.get("mode") or "add")
+            points = item.get("points", [])
+            cloned.append(
+                {
+                    "mode": mode,
+                    "points": [
+                        (float(point[0]) * scale_x, float(point[1]) * scale_y)
+                        for point in points  # type: ignore[index]
+                    ],
+                }
+            )
+        return cloned
+
+    def clone_template_saved_object(
+        self,
+        item: dict[str, object],
+        index: int,
+        scale_x: float,
+        scale_y: float,
+    ) -> SavedObject | None:
+        if self.image_np is None:
+            return None
+        polygons = self.clone_template_polygons(item.get("yolo_polygons", []), scale_x, scale_y)  # type: ignore[arg-type]
+        mask = yolo_edit_polygons_to_mask(polygons, self.image_np.shape)
+        if not mask.any():
+            return None
+        color_values = item.get("color_rgb")
+        try:
+            color = np.array(color_values, dtype=np.uint8) if color_values else color_for_index(index)
+            if color.shape != (3,):
+                color = color_for_index(index)
+        except Exception:
+            color = color_for_index(index)
+        return SavedObject(
+            name=str(item.get("name") or f"Template {index}"),
+            mask=mask,
+            color=color,
+            score=float(item.get("score") or 1.0),
+            class_id=int(item.get("class_id") or 0),
+            yolo_polygons=polygons,
+        )
+
+    def template_object_payload(self, saved: SavedObject, index: int) -> dict[str, object]:
+        polygons = saved.yolo_polygons or mask_to_yolo_edit_polygons(
+            saved.mask,
+            epsilon=float(self.yolo_epsilon_spin.value()),
+            min_area=float(self.yolo_min_area_spin.value()),
+        )
+        return {
+            "name": saved.name or f"Template {index}",
+            "class_id": int(saved.class_id),
+            "score": float(saved.score),
+            "color_rgb": [int(value) for value in saved.color],
+            "yolo_polygons": [
+                {
+                    "mode": str(item.get("mode") or "add"),
+                    "points": [(float(x), float(y)) for x, y in item.get("points", [])],  # type: ignore[misc]
+                }
+                for item in polygons
+            ],
+        }
+
+    def update_template_status_label(self) -> None:
+        if not hasattr(self, "template_status_label"):
+            return
+        if not self.mask_template:
+            self.template_status_label.setText("Template: none")
+            return
+        count = len(self.mask_template.get("objects", []))  # type: ignore[arg-type]
+        mode = str(self.mask_template.get("mode") or "original")
+        shape = self.mask_template.get("shape", (0, 0))
+        self.template_status_label.setText(f"Template: {count} object(s), {mode}, {shape[1]}x{shape[0]}")  # type: ignore[index]
+
+    def save_mask_template(self) -> None:
+        if self.image_np is None:
+            self.set_status("Open an image first")
+            return
+        if self.current_mask is not None:
+            answer = QMessageBox.question(
+                self,
+                "Active mask",
+                "Accept the active mask into objects before saving the template?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if answer == QMessageBox.Yes:
+                self.accept_current_mask()
+        if not self.saved_objects:
+            self.set_status("No saved objects to use as template")
+            return
+        hough_variant = self.working_hough_variant()
+        height, width = self.image_np.shape[:2]
+        self.mask_template = {
+            "mode": f"hough_{hough_variant}" if hough_variant else "original",
+            "hough_variant": hough_variant,
+            "hough_settings": self.current_hough_settings_payload(),
+            "shape": (height, width),
+            "objects": [
+                self.template_object_payload(saved, index)
+                for index, saved in enumerate(self.saved_objects, start=1)
+            ],
+        }
+        self.update_template_status_label()
+        self.set_status("Template saved for this session")
+
+    def confirm_replace_with_template(self) -> bool:
+        has_existing = bool(self.saved_objects or self.points or self.current_mask is not None)
+        if not has_existing:
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Apply template",
+            "Replace current objects and points with the saved template?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
+
+    def apply_template_objects_to_working_image(self, template: dict[str, object]) -> bool:
+        if self.image_np is None:
+            return False
+        template_shape = template.get("shape", self.image_np.shape[:2])
+        if not isinstance(template_shape, tuple) or len(template_shape) < 2:
+            template_shape = self.image_np.shape[:2]
+        template_height = max(1.0, float(template_shape[0]))
+        template_width = max(1.0, float(template_shape[1]))
+        height, width = self.image_np.shape[:2]
+        scale_x = float(width) / template_width
+        scale_y = float(height) / template_height
+        objects: list[SavedObject] = []
+        for index, item in enumerate(template.get("objects", []), start=1):  # type: ignore[arg-type]
+            if not isinstance(item, dict):
+                continue
+            saved = self.clone_template_saved_object(item, index, scale_x, scale_y)
+            if saved is not None:
+                objects.append(saved)
+        if not objects:
+            self.set_status("Template had no usable polygons for this image")
+            return False
+        self.points.clear()
+        self.current_mask = None
+        self.current_score = 0.0
+        self.current_yolo_polygons.clear()
+        self.current_yolo_dirty = False
+        self.saved_objects = objects
+        self.edit_drag_target = None
+        self.selected_polygon_index = -1
+        self.selected_vertex_index = -1
+        self.draft_polygon_points.clear()
+        self.draft_polygon_active = False
+        if hasattr(self, "new_polygon_button"):
+            self.new_polygon_button.setChecked(False)
+        self.dirty = True
+        self.point_version += 1
+        self.update_object_list()
+        self.render_canvas(fit=True)
+        self.set_status(f"Template applied: {len(objects)} object(s)")
+        return True
+
+    def apply_mask_template(self) -> None:
+        if not self.mask_template:
+            self.set_status("No template saved")
+            return
+        if self.image_path is None or self.original_image_np is None:
+            self.set_status("Open an image first")
+            return
+        if not self.confirm_replace_with_template():
+            return
+        hough_variant = self.mask_template.get("hough_variant")
+        if hough_variant:
+            if self.hough_running:
+                self.set_status("Wait for current Hough preprocessing")
+                return
+            self.pending_template = self.mask_template
+            self.run_hough_preprocess(
+                action_after_run="template",
+                output_variant=str(hough_variant),
+                settings=self.hough_settings_from_payload(self.mask_template.get("hough_settings")),  # type: ignore[arg-type]
+                confirm_discard=False,
+            )
+            return
+
+        self.set_working_image(
+            self.original_image_np.copy(),
+            self.image_path.name,
+            "Applying template to original image",
+            prepare_sam=True,
+            fit=True,
+        )
+        self.apply_template_objects_to_working_image(self.mask_template)
+
     def set_working_image(
         self,
         image: np.ndarray,
@@ -1269,7 +1506,13 @@ class PySideSamWindow(QMainWindow):
     def preview_hough_preprocess(self) -> None:
         self.run_hough_preprocess(action_after_run="preview")
 
-    def run_hough_preprocess(self, action_after_run: str, output_variant: str | None = None) -> None:
+    def run_hough_preprocess(
+        self,
+        action_after_run: str,
+        output_variant: str | None = None,
+        settings: HoughPreprocessSettings | None = None,
+        confirm_discard: bool = True,
+    ) -> None:
         if self.image_path is None or self.original_image_np is None:
             self.set_status("Open an image first")
             return
@@ -1281,12 +1524,12 @@ class PySideSamWindow(QMainWindow):
             else:
                 self.set_status("Hough preprocessing is running")
             return
-        if not self.hough_preview_active and not self.confirm_discard_work():
+        if confirm_discard and not self.hough_preview_active and not self.confirm_discard_work():
             return
 
         image_path = self.image_path
         source_image = self.original_image_np.copy()
-        settings = self.hough_settings()
+        settings = settings or self.hough_settings()
         self.hough_running = True
         self.hough_action_after_run = action_after_run
         self.hough_requested_output = output_variant or self.selected_hough_output()
@@ -1600,6 +1843,7 @@ class PySideSamWindow(QMainWindow):
                     if image_path != self.image_path:
                         self.hough_action_after_run = None
                         self.hough_requested_output = None
+                        self.pending_template = None
                         continue
                     self.hough_result = hough_result
                     action_after_run = self.hough_action_after_run or "preview"
@@ -1609,6 +1853,20 @@ class PySideSamWindow(QMainWindow):
                     if action_after_run == "use":
                         self.use_hough_image_for_sam(output_variant)
                         self.set_status(f"Using Hough {output_variant}: {hough_result.method}")
+                    elif action_after_run == "template":
+                        template = self.pending_template
+                        self.pending_template = None
+                        self.hough_preview_active = False
+                        image = hough_result_image(hough_result, output_variant)
+                        self.set_working_image(
+                            image,
+                            hough_output_name(self.image_path, output_variant),
+                            f"Using Hough {output_variant} for template",
+                            prepare_sam=True,
+                            fit=True,
+                        )
+                        if template is not None:
+                            self.apply_template_objects_to_working_image(template)
                     else:
                         self.hough_preview_active = True
                         self.refresh_hough_preview()
@@ -1617,6 +1875,7 @@ class PySideSamWindow(QMainWindow):
                     self.hough_running = False
                     self.hough_action_after_run = None
                     self.hough_requested_output = None
+                    self.pending_template = None
                     self.set_status(str(message_data))
                     QMessageBox.critical(self, "Hough preprocessing", str(message_data))
         except queue.Empty:
