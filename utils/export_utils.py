@@ -744,6 +744,7 @@ def saved_object_to_annotation_payload(saved: SavedObject, object_id: int) -> di
 def write_saved_objects_annotation_json(
     path: Path,
     source_image_path: Path,
+    output_image_path: Path | None,
     output_image_name: str,
     image_shape: tuple[int, int] | tuple[int, int, int],
     saved_objects: Sequence[SavedObject],
@@ -754,6 +755,22 @@ def write_saved_objects_annotation_json(
         source_abs = str(source_image_path.resolve())
     except OSError:
         source_abs = str(source_image_path)
+    image_record: dict[str, object] = {
+        "file_name": output_image_name,
+        "stem": Path(output_image_name).stem,
+        "height": height,
+        "width": width,
+        "coordinate_space": "output_image",
+    }
+    if output_image_path is not None:
+        try:
+            image_record["path"] = str(output_image_path.resolve())
+        except OSError:
+            image_record["path"] = str(output_image_path)
+        try:
+            image_record["relative_path"] = Path(os.path.relpath(output_image_path, path.parent)).as_posix()
+        except ValueError:
+            image_record["relative_path"] = str(output_image_path)
     payload = {
         "format": "sam2_studio_annotation_v1",
         "source": {
@@ -762,12 +779,7 @@ def write_saved_objects_annotation_json(
             "file_name": source_image_path.name,
             "stem": source_image_path.stem,
         },
-        "image": {
-            "file_name": output_image_name,
-            "stem": Path(output_image_name).stem,
-            "height": height,
-            "width": width,
-        },
+        "image": image_record,
         "objects": [
             saved_object_to_annotation_payload(saved, object_id)
             for object_id, saved in enumerate(saved_objects, start=1)
@@ -806,7 +818,7 @@ def save_interactive_results(
     save_png(render_saved_overlay(image, saved_objects), overlay_path)
     save_png(build_color_mask(saved_objects), color_path)
     write_saved_objects_csv(csv_path, saved_objects)
-    write_saved_objects_annotation_json(annotation_path, image_path, output_image_name, image.shape, saved_objects)
+    write_saved_objects_annotation_json(annotation_path, image_path, train_image_path, output_image_name, image.shape, saved_objects)
 
     outputs = {
         "train_image": train_image_path,

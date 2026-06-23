@@ -677,12 +677,116 @@ class PySideSamWindow(QMainWindow):
         ignored = {"", ".", "metadata", "labels", "img", "images", "previews", "masks", "mask_rcnn"}
         return {part.casefold() for part in parts if part.casefold() not in ignored}
 
+    @staticmethod
+    def base_image_stem(stem: str) -> str:
+        lowered = stem.casefold()
+        for suffix in ("_hough_crop", "_hough_full", "_hough_mask", "_hough_debug"):
+            if lowered.endswith(suffix):
+                return stem[: -len(suffix)].casefold()
+        return lowered
+
     def annotation_path_tokens(self, annotation_path: Path, output_dir: Path) -> set[str]:
         try:
             parent_parts = annotation_path.relative_to(output_dir).parent.parts
         except ValueError:
             parent_parts = annotation_path.parent.parts
         return self.meaningful_folder_tokens(parent_parts)
+
+    def candidate_output_images(self, image_name: str, label_path: Path | None = None) -> list[Path]:
+        if self.output_dir is None:
+            return []
+        output_dir = self.output_dir
+        candidates: list[Path] = []
+        image_path = Path(image_name) if image_name else Path()
+        if image_name:
+            candidates.append(output_dir / "img" / image_path)
+            candidates.append(output_dir / image_path)
+            if label_path is not None:
+                try:
+                    label_relative = label_path.relative_to(output_dir)
+                    if len(label_relative.parts) >= 2 and label_relative.parts[0].casefold() in {"labels", "mask_rcnn"}:
+                        candidates.append(output_dir / "img" / Path(*label_relative.parts[1:]).with_name(image_path.name))
+                except ValueError:
+                    pass
+        if image_path.suffix:
+            return candidates
+
+        stem = image_path.name if image_name else (label_path.stem if label_path is not None else "")
+        if not stem:
+            return candidates
+        for extension in DEFAULT_EXTENSIONS:
+            candidates.append(output_dir / "img" / f"{stem}{extension}")
+            if label_path is not None:
+                try:
+                    label_relative = label_path.relative_to(output_dir)
+                    if len(label_relative.parts) >= 2 and label_relative.parts[0].casefold() in {"labels", "mask_rcnn"}:
+                        candidates.append(output_dir / "img" / Path(*label_relative.parts[1:]).with_suffix(extension))
+                except ValueError:
+                    pass
+        return candidates
+
+    def find_output_image_for_record(self, record: dict[str, object]) -> Path | None:
+        image_path_text = str(record.get("image_path") or "")
+        if image_path_text:
+            image_path = Path(image_path_text)
+            if image_path.exists():
+                return image_path
+            if self.output_dir is not None:
+                candidate = self.output_dir / image_path
+                if candidate.exists():
+                    return candidate
+        image_relative_text = str(record.get("image_relative_path") or "")
+        if image_relative_text and record.get("path"):
+            candidate = Path(record["path"]).parent / image_relative_text
+            if candidate.exists():
+                return candidate
+
+        label_path = Path(record["path"]) if record.get("path") else None
+        image_name = str(record.get("image_file_name") or record.get("image_name") or "")
+        for candidate in self.candidate_output_images(image_name, label_path):
+            if candidate.exists():
+                return candidate
+        return None
+
+    def make_annotation_record(
+        self,
+        *,
+        kind: str,
+        path: Path,
+        source_abs: str = "",
+        source_name: str = "",
+        source_stem: str = "",
+        source_parent: str = "",
+        image_name: str = "",
+        image_stem: str = "",
+        image_path: str = "",
+        image_relative_path: str = "",
+        width: int = 0,
+        height: int = 0,
+        path_tokens: set[str] | None = None,
+    ) -> dict[str, object]:
+        resolved_source_stem = source_stem or Path(source_name).stem
+        resolved_image_stem = image_stem or Path(image_name).stem or path.stem
+        return {
+            "kind": kind,
+            "path": path,
+            "mtime": path.stat().st_mtime,
+            "source_abs": source_abs.casefold(),
+            "source_name": source_name.casefold(),
+            "source_file_name": source_name,
+            "source_stem": resolved_source_stem.casefold(),
+            "source_base_stem": self.base_image_stem(resolved_source_stem),
+            "source_parent": source_parent.casefold(),
+            "image_name": image_name.casefold(),
+            "image_file_name": image_name,
+            "image_stem": resolved_image_stem.casefold(),
+            "image_base_stem": self.base_image_stem(resolved_image_stem),
+            "image_path": image_path,
+            "image_relative_path": image_relative_path,
+            "path_tokens": path_tokens or self.annotation_path_tokens(path, self.output_dir or path.parent),
+            "width": int(width or 0),
+            "height": int(height or 0),
+        }
 
     def build_annotation_index(self) -> None:
         if self.output_dir is None:
@@ -710,20 +814,21 @@ class PySideSamWindow(QMainWindow):
                 if source_parent:
                     path_tokens.add(source_parent.casefold())
                 records.append(
-                    {
-                        "kind": "annotation",
-                        "path": annotation_path,
-                        "mtime": annotation_path.stat().st_mtime,
-                        "source_abs": source_path_text.casefold(),
-                        "source_name": str(source.get("file_name") or "").casefold(),
-                        "source_stem": str(source.get("stem") or "").casefold(),
-                        "source_parent": source_parent.casefold(),
-                        "image_name": str(image.get("file_name") or "").casefold(),
-                        "image_stem": str(image.get("stem") or annotation_path.stem.replace("_annotation", "")).casefold(),
-                        "path_tokens": path_tokens,
-                        "width": int(image.get("width") or 0),
-                        "height": int(image.get("height") or 0),
-                    }
+                    self.make_annotation_record(
+                        kind="annotation",
+                        path=annotation_path,
+                        source_abs=source_path_text,
+                        source_name=str(source.get("file_name") or ""),
+                        source_stem=str(source.get("stem") or ""),
+                        source_parent=source_parent,
+                        image_name=str(image.get("file_name") or ""),
+                        image_stem=str(image.get("stem") or annotation_path.stem.replace("_annotation", "")),
+                        image_path=str(image.get("path") or ""),
+                        image_relative_path=str(image.get("relative_path") or ""),
+                        width=int(image.get("width") or 0),
+                        height=int(image.get("height") or 0),
+                        path_tokens=path_tokens,
+                    )
                 )
 
             for label_path in output_dir.rglob("*.txt"):
@@ -732,20 +837,37 @@ class PySideSamWindow(QMainWindow):
                 if label_path.name.startswith("."):
                     continue
                 records.append(
-                    {
-                        "kind": "yolo",
-                        "path": label_path,
-                        "mtime": label_path.stat().st_mtime,
-                        "source_abs": "",
-                        "source_name": f"{label_path.stem}".casefold(),
-                        "source_stem": label_path.stem.casefold(),
-                        "source_parent": "",
-                        "image_name": f"{label_path.stem}{label_path.suffix}".casefold(),
-                        "image_stem": label_path.stem.casefold(),
-                        "path_tokens": self.annotation_path_tokens(label_path, output_dir),
-                        "width": 0,
-                        "height": 0,
-                    }
+                    self.make_annotation_record(
+                        kind="yolo",
+                        path=label_path,
+                        source_stem=label_path.stem,
+                        image_name=label_path.stem,
+                        image_stem=label_path.stem,
+                    )
+                )
+
+            for mask_rcnn_path in output_dir.rglob("*.json"):
+                if "mask_rcnn" not in {part.casefold() for part in mask_rcnn_path.parts}:
+                    continue
+                try:
+                    payload = json.loads(mask_rcnn_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                image = payload.get("image", {}) if isinstance(payload, dict) else {}
+                annotations = payload.get("annotations", []) if isinstance(payload, dict) else []
+                if not isinstance(image, dict) or not isinstance(annotations, list) or not annotations:
+                    continue
+                image_name = str(image.get("file_name") or mask_rcnn_path.stem)
+                records.append(
+                    self.make_annotation_record(
+                        kind="mask_rcnn",
+                        path=mask_rcnn_path,
+                        source_stem=Path(image_name).stem,
+                        image_name=image_name,
+                        image_stem=Path(image_name).stem,
+                        width=int(image.get("width") or 0),
+                        height=int(image.get("height") or 0),
+                    )
                 )
 
         self.annotation_index_dir = output_dir
@@ -768,6 +890,10 @@ class PySideSamWindow(QMainWindow):
             score += 120
         if record.get("image_stem") == stem:
             score += 110
+        if record.get("source_base_stem") == self.base_image_stem(stem):
+            score += 115
+        if record.get("image_base_stem") == self.base_image_stem(stem):
+            score += 105
         record_tokens = record.get("path_tokens")
         if isinstance(record_tokens, set) and record_tokens:
             image_tokens = self.meaningful_folder_tokens(image_path.parent.parts)
@@ -867,6 +993,96 @@ class PySideSamWindow(QMainWindow):
             )
         return saved_objects
 
+    def decode_mask_rcnn_segmentation(self, item: dict[str, object], annotation_path: Path) -> np.ndarray | None:
+        if self.image_np is None:
+            return None
+        segmentation = item.get("segmentation")
+        if isinstance(segmentation, dict):
+            mask_path_text = str(segmentation.get("path") or "")
+            if mask_path_text:
+                mask_path = annotation_path.parent / mask_path_text
+                if mask_path.exists():
+                    return load_rgb_image(mask_path)[:, :, 0] > 0
+            counts = segmentation.get("counts")
+            size = segmentation.get("size")
+            if counts is not None and isinstance(size, list) and len(size) == 2:
+                try:
+                    from pycocotools import mask as mask_utils
+
+                    rle = {"size": [int(size[0]), int(size[1])], "counts": counts.encode("utf-8") if isinstance(counts, str) else counts}
+                    return np.asarray(mask_utils.decode(rle), dtype=bool)
+                except Exception:
+                    return None
+        mask_path_text = str(item.get("mask") or "")
+        if mask_path_text:
+            mask_path = annotation_path.parent / mask_path_text
+            if mask_path.exists():
+                return load_rgb_image(mask_path)[:, :, 0] > 0
+        return None
+
+    def saved_objects_from_mask_rcnn_annotation(self, path: Path) -> list[SavedObject]:
+        if self.image_np is None:
+            return []
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        annotations = payload.get("annotations", []) if isinstance(payload, dict) else []
+        if not isinstance(annotations, list):
+            return []
+        saved_objects: list[SavedObject] = []
+        for object_index, item in enumerate(annotations, start=1):
+            if not isinstance(item, dict):
+                continue
+            mask = self.decode_mask_rcnn_segmentation(item, path)
+            if mask is None or not mask.any():
+                continue
+            if mask.shape[:2] != self.image_np.shape[:2]:
+                continue
+            class_id = int(item.get("class_id", item.get("category_id", 0)) or 0)
+            saved_objects.append(
+                SavedObject(
+                    name=f"Object {object_index}",
+                    mask=mask,
+                    color=color_for_index(object_index),
+                    score=1.0,
+                    class_id=class_id,
+                    yolo_polygons=mask_to_yolo_edit_polygons(mask),
+                )
+            )
+        return saved_objects
+
+    def prepare_working_image_for_record(self, record: dict[str, object]) -> bool:
+        if self.image_np is None:
+            return False
+        record_width = int(record.get("width") or 0)
+        record_height = int(record.get("height") or 0)
+        current_height, current_width = self.image_np.shape[:2]
+        record_image_name = str(record.get("image_file_name") or record.get("image_name") or "")
+        record_stem = str(record.get("image_stem") or "")
+        current_stem = self.image_path.stem.casefold() if self.image_path is not None else ""
+        working_image_name = self.working_image_name or ""
+        needs_output_image = bool(record_image_name and Path(record_image_name).name.casefold() != working_image_name.casefold())
+        if record_width and record_height and (record_width != current_width or record_height != current_height):
+            needs_output_image = True
+        if record_stem and record_stem != current_stem and self.base_image_stem(record_stem) == self.base_image_stem(current_stem):
+            needs_output_image = True
+
+        output_image_path = self.find_output_image_for_record(record)
+        if not needs_output_image:
+            return True
+        if output_image_path is None:
+            if record_width and record_height and (record_width != current_width or record_height != current_height):
+                self.set_status(
+                    f"Found annotation for {record_image_name or record_stem}, but its {record_width}x{record_height} image is missing."
+                )
+                return False
+            return True
+
+        image = load_rgb_image(output_image_path)
+        self.image_np = np.ascontiguousarray(image)
+        self.working_image_name = output_image_path.name
+        self.hough_preview_active = False
+        self.image_version += 1
+        return True
+
     def restore_existing_annotation_for_current_image(self) -> bool:
         if self.image_path is None or self.image_np is None or self.output_dir is None:
             return False
@@ -875,8 +1091,12 @@ class PySideSamWindow(QMainWindow):
             return False
         path = Path(record["path"])
         try:
+            if not self.prepare_working_image_for_record(record):
+                return False
             if record.get("kind") == "annotation":
                 restored = self.saved_objects_from_annotation_json(path)
+            elif record.get("kind") == "mask_rcnn":
+                restored = self.saved_objects_from_mask_rcnn_annotation(path)
             else:
                 restored = self.saved_objects_from_yolo_label(path)
         except Exception as exc:
@@ -887,7 +1107,7 @@ class PySideSamWindow(QMainWindow):
         self.saved_objects = restored
         self.dirty = False
         self.update_object_list()
-        self.set_status(f"Restored {len(restored)} object(s) from {path.name}")
+        self.set_status(f"Restored {len(restored)} object(s) from {path.name} on {self.working_image_name}")
         return True
 
     def reset_annotation_state(self) -> None:
