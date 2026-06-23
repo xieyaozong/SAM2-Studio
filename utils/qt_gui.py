@@ -252,6 +252,8 @@ class PySideSamWindow(QMainWindow):
         self.edit_move_target: tuple[int, float, float] | None = None
         self.edit_undo_stack: list[dict[str, object]] = []
         self.edit_undo_limit = 25
+        self.sam_hole_predicting = False
+        self.sam_hole_version = 0
         self.selected_polygon_index = -1
         self.selected_vertex_index = -1
         self.draft_polygon_points: list[tuple[float, float]] = []
@@ -610,6 +612,25 @@ class PySideSamWindow(QMainWindow):
         self.polygon_edit_check.toggled.connect(self.set_polygon_edit_enabled)
         layout.addWidget(self.polygon_edit_check)
 
+        tool_row = QHBoxLayout()
+        tool_row.setSpacing(6)
+        self.polygon_mode_button = QPushButton("Polygon Edit")
+        self.polygon_mode_button.setCheckable(True)
+        self.polygon_mode_button.setChecked(True)
+        self.polygon_mode_button.setProperty("activeAction", True)
+        self.polygon_mode_button.clicked.connect(lambda: self.set_polygon_tool_mode("polygon"))
+        self.sam_hole_mode_button = QPushButton("SAM Hole")
+        self.sam_hole_mode_button.setCheckable(True)
+        self.sam_hole_mode_button.setProperty("activeAction", True)
+        self.sam_hole_mode_button.clicked.connect(lambda: self.set_polygon_tool_mode("sam_hole"))
+        self.polygon_tool_group = QButtonGroup(self)
+        self.polygon_tool_group.setExclusive(True)
+        self.polygon_tool_group.addButton(self.polygon_mode_button)
+        self.polygon_tool_group.addButton(self.sam_hole_mode_button)
+        tool_row.addWidget(self.polygon_mode_button)
+        tool_row.addWidget(self.sam_hole_mode_button)
+        layout.addLayout(tool_row)
+
         self.whole_mask_drag_check = QCheckBox("Drag selected mask/polygon")
         self.whole_mask_drag_check.setProperty("toolMode", True)
         self.whole_mask_drag_check.setToolTip("Drag the active SAM mask or the selected saved object as one piece. Shift-drag also works.")
@@ -641,8 +662,7 @@ class PySideSamWindow(QMainWindow):
         undo_draft.clicked.connect(self.undo_draft_polygon_point)
         self.add_button_row(layout, cancel_polygon, undo_draft)
 
-        sam_hole = QPushButton("SAM Mask -> Hole")
-        sam_hole.setProperty("accent", True)
+        sam_hole = QPushButton("Convert Active SAM Mask To Hole")
         sam_hole.clicked.connect(self.subtract_current_sam_mask_from_selected_object)
         layout.addWidget(sam_hole)
 
@@ -1246,6 +1266,8 @@ class PySideSamWindow(QMainWindow):
         self.current_yolo_dirty = False
         self.edit_drag_target = None
         self.edit_move_target = None
+        self.sam_hole_predicting = False
+        self.sam_hole_version += 1
         self.selected_polygon_index = -1
         self.selected_vertex_index = -1
         self.draft_polygon_points.clear()
@@ -1881,10 +1903,21 @@ class PySideSamWindow(QMainWindow):
                     if self.pending_prediction or version != self.point_version:
                         self.pending_prediction = False
                         self.predict_current_mask_async()
+                elif message_type == "hole_prediction":
+                    version, image_version, target_index, hole_mask, score = message_data
+                    self.sam_hole_predicting = False
+                    if version != self.sam_hole_version or image_version != self.image_version:
+                        continue
+                    if self.apply_hole_mask_to_target(int(target_index), hole_mask, label="SAM hole"):
+                        self.set_status(f"SAM hole score {float(score):.3f}")
+                elif message_type == "hole_done":
+                    if int(message_data) == self.sam_hole_version:
+                        self.sam_hole_predicting = False
                 elif message_type == "error":
                     self.model_loading = False
                     self.embedding = False
                     self.predicting = False
+                    self.sam_hole_predicting = False
                     self.set_status(str(message_data))
                     QMessageBox.critical(self, "SAM 2 Studio", str(message_data))
                 elif message_type == "hough_ready":
@@ -1991,6 +2024,69 @@ class PySideSamWindow(QMainWindow):
                 self.messages.put(("prediction", (version, masks[best_index].astype(bool), float(scores[best_index]))))
             except Exception as exc:
                 self.messages.put(("error", f"Prediction failed: {exc}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def predict_sam_hole_async(self, x: float, y: float) -> None:
+        if self.predictor is None or self.device is None or not self.image_ready:
+            self.set_status("Wait for image preparation")
+            return
+        if self.hough_preview_active:
+            self.set_status("Use Hough For SAM before hole selection")
+            return
+        if self.predicting or self.sam_hole_predicting:
+            self.set_status("Wait for current SAM prediction")
+            return
+        target_index = self.sam_hole_target_index()
+        if target_index is None:
+            self.set_status("Create an active mask or select an object first")
+            return
+        target_mask = self.mask_for_target(target_index)
+        if target_mask is None or not target_mask.any():
+            self.set_status("Target mask is empty")
+            return
+        if not self.target_contains_point(target_index, x, y):
+            self.set_status("Click inside the target mask to make a hole")
+            return
+
+        coords = np.array([(x, y)], dtype=np.float32)
+        labels = np.array([1], dtype=np.int32)
+        target_mask = target_mask.astype(bool).copy()
+        predictor = self.predictor
+        device = self.device
+        self.sam_hole_predicting = True
+        self.sam_hole_version += 1
+        version = self.sam_hole_version
+        image_version = self.image_version
+        self.set_status("Predicting SAM hole")
+
+        def worker() -> None:
+            try:
+                with torch.inference_mode(), inference_autocast(device):
+                    masks, scores, _low_res = predictor.predict(
+                        point_coords=coords,
+                        point_labels=labels,
+                        multimask_output=True,
+                    )
+                best: tuple[float, np.ndarray] | None = None
+                for index, score in sorted(
+                    enumerate(scores),
+                    key=lambda item: float(item[1]),
+                    reverse=True,
+                ):
+                    clipped = masks[index].astype(bool) & target_mask
+                    if not clipped.any():
+                        continue
+                    best = (float(score), clipped)
+                    break
+                if best is None:
+                    self.messages.put(("status", "SAM hole did not overlap the target mask"))
+                    self.messages.put(("hole_done", version))
+                    return
+                score, clipped_mask = best
+                self.messages.put(("hole_prediction", (version, image_version, target_index, clipped_mask, score)))
+            except Exception as exc:
+                self.messages.put(("error", f"SAM hole prediction failed: {exc}"))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2201,6 +2297,15 @@ class PySideSamWindow(QMainWindow):
         object_index = self.selected_object_index()
         return object_index if object_index >= 0 else None
 
+    def sam_hole_target_index(self) -> int | None:
+        if self.current_mask is not None:
+            return -1
+        object_index = self.selected_object_index()
+        if object_index < 0 and len(self.saved_objects) == 1:
+            self.objects_list.setCurrentRow(0)
+            object_index = 0
+        return object_index if object_index >= 0 else None
+
     def selected_move_target_index(self) -> int | None:
         mode = str(self.move_target_combo.currentData() if hasattr(self, "move_target_combo") else "auto")
         if mode == "current":
@@ -2211,6 +2316,10 @@ class PySideSamWindow(QMainWindow):
         return self.active_polygon_target_index()
 
     def rendered_polygon_target_index(self) -> int:
+        if self.sam_hole_mode_enabled():
+            hole_target_index = self.sam_hole_target_index()
+            if hole_target_index is not None:
+                return hole_target_index
         if hasattr(self, "whole_mask_drag_check") and self.whole_mask_drag_check.isChecked():
             move_target_index = self.selected_move_target_index()
             if move_target_index is not None:
@@ -2270,6 +2379,10 @@ class PySideSamWindow(QMainWindow):
         self.render_canvas()
 
     def set_polygon_edit_enabled(self, enabled: bool) -> None:
+        if enabled and hasattr(self, "polygon_mode_button") and not (
+            self.polygon_mode_button.isChecked() or self.sam_hole_mode_button.isChecked()
+        ):
+            self.polygon_mode_button.setChecked(True)
         self.canvas.set_edit_mode(enabled)
         if enabled and self.current_mask is None and self.selected_object_index() < 0 and self.saved_objects:
             self.objects_list.setCurrentRow(0)
@@ -2282,6 +2395,27 @@ class PySideSamWindow(QMainWindow):
                 self.new_polygon_button.setChecked(False)
         self.render_canvas()
         self.set_status("YOLO polygon edit mode" if enabled else "Point mode")
+
+    def set_polygon_tool_mode(self, mode: str) -> None:
+        if mode == "sam_hole":
+            self.sam_hole_mode_button.setChecked(True)
+            self.cancel_draft_polygon()
+            self.whole_mask_drag_check.setChecked(False)
+            self.polygon_edit_check.setChecked(True)
+            if self.current_mask is None and self.selected_object_index() < 0 and self.saved_objects:
+                self.objects_list.setCurrentRow(0)
+            self.set_status("SAM hole mode: click inside the target mask")
+            return
+        self.polygon_mode_button.setChecked(True)
+        self.polygon_edit_check.setChecked(True)
+        self.set_status("Polygon edit mode")
+
+    def sam_hole_mode_enabled(self) -> bool:
+        return bool(
+            hasattr(self, "sam_hole_mode_button")
+            and self.polygon_edit_check.isChecked()
+            and self.sam_hole_mode_button.isChecked()
+        )
 
     def target_contains_point(self, target_index: int, x: float, y: float) -> bool:
         mask = self.mask_for_target(target_index)
@@ -2446,6 +2580,8 @@ class PySideSamWindow(QMainWindow):
         self.rebuild_target_mask_from_polygons(object_index)
 
     def start_draft_polygon(self) -> None:
+        if hasattr(self, "polygon_mode_button"):
+            self.polygon_mode_button.setChecked(True)
         if self.active_polygon_target_index() is None:
             self.set_status("Create a SAM2 mask first or select an object")
             self.new_polygon_button.setChecked(False)
@@ -2511,6 +2647,79 @@ class PySideSamWindow(QMainWindow):
         if self.delete_polygon(target_index, self.selected_polygon_index):
             self.set_status("Polygon deleted")
 
+    def apply_hole_mask_to_target(
+        self,
+        target_index: int,
+        hole_mask: np.ndarray,
+        *,
+        label: str = "hole",
+        clear_active_mask: bool = False,
+    ) -> bool:
+        if self.image_np is None:
+            return False
+        target_mask = self.mask_for_target(target_index)
+        if target_mask is None or not target_mask.any():
+            self.set_status("Target mask is empty")
+            return False
+        clipped_hole = np.asarray(hole_mask, dtype=bool) & target_mask.astype(bool)
+        if not clipped_hole.any():
+            self.set_status("Hole does not overlap the target mask")
+            return False
+
+        target_polygons = self.polygons_for_target(target_index)
+        base_polygons: list[dict[str, object]] = []
+        if not target_polygons:
+            base_polygons = mask_to_yolo_edit_polygons(
+                target_mask,
+                epsilon=float(self.yolo_epsilon_spin.value()),
+                min_area=float(self.yolo_min_area_spin.value()),
+            )
+            if not base_polygons:
+                self.set_status("Target has no editable polygon")
+                return False
+
+        hole_polygons = mask_to_yolo_edit_polygons(
+            clipped_hole,
+            epsilon=float(self.yolo_epsilon_spin.value()),
+            min_area=float(self.yolo_min_area_spin.value()),
+        )
+        if not hole_polygons:
+            self.set_status("SAM hole had no usable polygon")
+            return False
+
+        self.push_undo_state(label)
+        target_polygons.extend(self.clone_yolo_polygons(base_polygons))
+        first_new_index = len(target_polygons)
+        for item in hole_polygons:
+            target_polygons.append(
+                {
+                    "mode": "subtract",
+                    "points": [(float(x), float(y)) for x, y in item.get("points", [])],  # type: ignore[misc]
+                }
+            )
+
+        if clear_active_mask:
+            self.points.clear()
+            self.current_mask = None
+            self.current_score = 0.0
+            self.current_yolo_polygons.clear()
+            self.current_yolo_dirty = False
+            self.point_version += 1
+
+        self.selected_polygon_index = first_new_index
+        self.selected_vertex_index = -1
+        self.edit_drag_target = None
+        self.edit_move_target = None
+        self.rebuild_target_mask_from_polygons(target_index)
+        self.update_object_list()
+        if target_index >= 0:
+            self.objects_list.setCurrentRow(target_index)
+            self.selected_polygon_index = first_new_index
+            self.selected_vertex_index = -1
+        self.polygon_edit_check.setChecked(True)
+        self.render_canvas()
+        return True
+
     def subtract_current_sam_mask_from_selected_object(self) -> None:
         if self.current_mask is None:
             self.set_status("Create a SAM2 mask for the hole first")
@@ -2522,56 +2731,24 @@ class PySideSamWindow(QMainWindow):
         if object_index < 0:
             self.set_status("Select the saved object to cut from")
             return
-        target_polygons = self.saved_objects[object_index].yolo_polygons
-        base_polygons: list[dict[str, object]] = []
-        if not target_polygons:
-            base_polygons = mask_to_yolo_edit_polygons(
-                self.saved_objects[object_index].mask,
-                epsilon=float(self.yolo_epsilon_spin.value()),
-                min_area=float(self.yolo_min_area_spin.value()),
-            )
-            if not base_polygons:
-                self.set_status("Selected object has no editable polygon")
-                return
-        hole_polygons = mask_to_yolo_edit_polygons(
+        if self.apply_hole_mask_to_target(
+            object_index,
             self.current_mask,
-            epsilon=float(self.yolo_epsilon_spin.value()),
-            min_area=float(self.yolo_min_area_spin.value()),
-        )
-        if not hole_polygons:
-            self.set_status("SAM mask had no usable polygon")
-            return
-        self.push_undo_state("SAM hole")
-        target_polygons.extend(self.clone_yolo_polygons(base_polygons))
-        first_new_index = len(target_polygons)
-        for item in hole_polygons:
-            target_polygons.append(
-                {
-                    "mode": "subtract",
-                    "points": [(float(x), float(y)) for x, y in item.get("points", [])],  # type: ignore[misc]
-                }
-            )
-        self.points.clear()
-        self.current_mask = None
-        self.current_score = 0.0
-        self.current_yolo_polygons.clear()
-        self.current_yolo_dirty = False
-        self.point_version += 1
-        self.selected_polygon_index = first_new_index
-        self.selected_vertex_index = -1
-        self.edit_drag_target = None
-        self.edit_move_target = None
-        self.rebuild_target_mask_from_polygons(object_index)
-        self.update_object_list()
-        self.objects_list.setCurrentRow(object_index)
-        self.polygon_edit_check.setChecked(True)
-        self.render_canvas()
-        self.set_status(f"Cut {len(hole_polygons)} SAM hole polygon(s)")
+            label="SAM hole",
+            clear_active_mask=True,
+        ):
+            self.set_status("Converted active SAM mask to hole")
 
     def handle_polygon_edit_event(self, event_type, x: float, y: float, button, modifiers) -> None:
         target_index = self.active_polygon_target_index()
         if self.image_np is None:
             self.set_status("Open an image first")
+            return
+        if self.sam_hole_mode_enabled():
+            if event_type == "press" and button == Qt.LeftButton:
+                self.predict_sam_hole_async(x, y)
+            elif event_type == "press" and button == Qt.RightButton:
+                self.set_status("SAM hole mode uses left-click inside the target mask")
             return
         if self.draft_polygon_active:
             if target_index is None or not self.ensure_polygons_for_target(target_index):
