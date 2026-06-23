@@ -74,6 +74,7 @@ import json
 import queue
 import sys
 import threading
+import time
 
 import numpy as np
 import torch
@@ -250,10 +251,20 @@ class PySideSamWindow(QMainWindow):
         self.selected_vertex_index = -1
         self.draft_polygon_points: list[tuple[float, float]] = []
         self.draft_polygon_active = False
+        self.overlay_cache_key: tuple[object, ...] | None = None
+        self.overlay_cache: np.ndarray | None = None
+        self.render_pending = False
+        self.render_pending_fit = False
+        self.render_interval_ms = 33
+        self.last_render_time = 0.0
         self.dirty = False
 
         self.build_ui(default_model)
         self.install_shortcuts()
+
+        self.render_timer = QTimer(self)
+        self.render_timer.setSingleShot(True)
+        self.render_timer.timeout.connect(self.flush_render_canvas)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_messages)
@@ -2113,18 +2124,64 @@ class PySideSamWindow(QMainWindow):
         self.canvas.fit_image()
 
     def render_canvas(self, fit: bool = False) -> None:
-        if self.image_np is None:
-            self.canvas.set_overlay(None, [])
-            if hasattr(self, "yolo_preview_label"):
-                self.yolo_preview_label.setText("YOLO polygons: off")
+        if self.image_np is None or not hasattr(self, "render_timer"):
+            self.render_pending = False
+            self.render_pending_fit = False
+            self.render_canvas_now(fit=fit)
             return
-        if hasattr(self, "polygon_edit_check") and self.polygon_edit_check.isChecked():
-            overlay = render_interactive_overlay(
+
+        self.render_pending_fit = self.render_pending_fit or fit
+        if self.render_pending:
+            return
+
+        elapsed_ms = (time.monotonic() - self.last_render_time) * 1000.0
+        delay_ms = 0 if fit or self.last_render_time <= 0 else max(0, int(self.render_interval_ms - elapsed_ms))
+        self.render_pending = True
+        self.render_timer.start(delay_ms)
+
+    def flush_render_canvas(self) -> None:
+        fit = self.render_pending_fit
+        self.render_pending = False
+        self.render_pending_fit = False
+        self.render_canvas_now(fit=fit)
+
+    def interactive_overlay_cache_key(self) -> tuple[object, ...]:
+        saved_key = tuple(
+            (
+                id(saved),
+                id(saved.mask),
+                tuple(int(value) for value in saved.color),
+            )
+            for saved in self.saved_objects
+        )
+        current_color = tuple(int(value) for value in self.current_color)
+        return (self.image_version, saved_key, id(self.current_mask), current_color)
+
+    def cached_interactive_overlay(self) -> np.ndarray:
+        if self.image_np is None:
+            return np.zeros((1, 1, 3), dtype=np.uint8)
+        key = self.interactive_overlay_cache_key()
+        if self.overlay_cache_key != key or self.overlay_cache is None:
+            self.overlay_cache = render_interactive_overlay(
                 self.image_np,
                 self.saved_objects,
                 self.current_mask,
                 self.current_color,
             )
+            self.overlay_cache_key = key
+        return self.overlay_cache
+
+    def render_canvas_now(self, fit: bool = False) -> None:
+        self.last_render_time = time.monotonic()
+        if self.image_np is None:
+            self.overlay_cache_key = None
+            self.overlay_cache = None
+            self.canvas.set_overlay(None, [])
+            if hasattr(self, "yolo_preview_label"):
+                self.yolo_preview_label.setText("YOLO polygons: off")
+            return
+        if hasattr(self, "polygon_edit_check") and self.polygon_edit_check.isChecked():
+            overlay = self.cached_interactive_overlay()
             overlay = render_yolo_edit_polygon_overlay(
                 overlay,
                 self.saved_objects,
@@ -2151,12 +2208,7 @@ class PySideSamWindow(QMainWindow):
             )
             self.yolo_preview_label.setText(f"YOLO polygons: {polygon_count}")
         else:
-            overlay = render_interactive_overlay(
-                self.image_np,
-                self.saved_objects,
-                self.current_mask,
-                self.current_color,
-            )
+            overlay = self.cached_interactive_overlay()
             self.yolo_preview_label.setText("YOLO polygons: off")
         show_prompt_points = not (hasattr(self, "polygon_edit_check") and self.polygon_edit_check.isChecked())
         self.canvas.set_overlay(overlay, self.points if show_prompt_points else [])
