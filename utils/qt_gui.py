@@ -4,12 +4,14 @@ from pathlib import Path
 from typing import Sequence
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import (
+    QBrush,
     QColor,
     QFont,
     QFontDatabase,
     QImage,
     QKeySequence,
     QPainter,
+    QPainterPath,
     QPen,
     QPixmap,
     QShortcut,
@@ -23,6 +25,8 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QGraphicsEllipseItem,
+    QGraphicsItem,
+    QGraphicsPathItem,
     QGraphicsPixmapItem,
     QGraphicsScene,
     QGraphicsView,
@@ -41,6 +45,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+try:
+    from PySide6.QtOpenGLWidgets import QOpenGLWidget
+except ImportError:
+    QOpenGLWidget = None
+
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from utils.config import (
     DEFAULT_EXTENSIONS,
@@ -52,8 +61,8 @@ from utils.config import (
 )
 from utils.export_utils import (
     mask_to_yolo_edit_polygons,
+    normalize_yolo_edit_polygons,
     render_interactive_overlay,
-    render_yolo_edit_polygon_overlay,
     render_yolo_polygon_overlay,
     save_interactive_results,
     yolo_edit_polygons_to_mask,
@@ -80,47 +89,154 @@ import numpy as np
 import torch
 
 
+def wheel_step_count(event) -> int:
+    delta = event.angleDelta().y()
+    if delta == 0:
+        delta = event.pixelDelta().y()
+    if delta == 0:
+        return 0
+    return int(delta / 120) if abs(delta) >= 120 else (1 if delta > 0 else -1)
+
+
+class StepWheelSpinBox(QSpinBox):
+    def __init__(self):
+        super().__init__()
+        self.setFocusPolicy(Qt.WheelFocus)
+
+    def wheelEvent(self, event) -> None:
+        steps = wheel_step_count(event)
+        if steps == 0:
+            event.ignore()
+            return
+        self.stepBy(steps)
+        event.accept()
+
+
+class StepWheelDoubleSpinBox(QDoubleSpinBox):
+    def __init__(self):
+        super().__init__()
+        self.setFocusPolicy(Qt.WheelFocus)
+
+    def wheelEvent(self, event) -> None:
+        steps = wheel_step_count(event)
+        if steps == 0:
+            event.ignore()
+            return
+        self.stepBy(steps)
+        event.accept()
+
+
 class SamCanvasView(QGraphicsView):
     def __init__(self, on_click, on_edit_event):
         super().__init__()
         self.on_click = on_click
         self.on_edit_event = on_edit_event
         self.scene_obj = QGraphicsScene(self)
+        self.scene_obj.setItemIndexMethod(QGraphicsScene.NoIndex)
         self.setScene(self.scene_obj)
         self.pixmap_item: QGraphicsPixmapItem | None = None
-        self.point_items: list[QGraphicsEllipseItem] = []
+        self.pixmap_key: tuple[object, ...] | None = None
+        self.image_size: tuple[int, int] | None = None
+        self.point_items: list[QGraphicsItem] = []
+        self.polygon_items: list[QGraphicsItem] = []
         self.has_image = False
         self.edit_mode = False
         self.dragging_edit = False
         self.middle_panning = False
         self.last_pan_pos = None
-        self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
+        self.pending_pan_dx = 0
+        self.pending_pan_dy = 0
+        self.pending_zoom_steps = 0.0
+        self.pending_zoom_anchor = None
+        self.fast_interaction = False
+        self.opengl_viewport = False
+        if QOpenGLWidget is not None and os.environ.get("SAM2_STUDIO_DISABLE_OPENGL") != "1":
+            try:
+                self.setViewport(QOpenGLWidget())
+                self.opengl_viewport = True
+            except Exception:
+                pass
+        self.setRenderHints(QPainter.Antialiasing)
+        viewport_update_mode = (
+            QGraphicsView.FullViewportUpdate
+            if self.opengl_viewport
+            else QGraphicsView.SmartViewportUpdate
+        )
+        self.setViewportUpdateMode(viewport_update_mode)
+        self.setOptimizationFlag(QGraphicsView.DontSavePainterState, True)
+        self.setOptimizationFlag(QGraphicsView.DontAdjustForAntialiasing, True)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
         self.setBackgroundBrush(QColor("#eef2f7"))
         self.setFrameShape(QFrame.NoFrame)
         self.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.pan_timer = QTimer(self)
+        self.pan_timer.setSingleShot(True)
+        self.pan_timer.timeout.connect(self.apply_pending_pan)
+        self.zoom_timer = QTimer(self)
+        self.zoom_timer.setSingleShot(True)
+        self.zoom_timer.timeout.connect(self.apply_pending_zoom)
+        self.fast_interaction_timer = QTimer(self)
+        self.fast_interaction_timer.setSingleShot(True)
+        self.fast_interaction_timer.timeout.connect(self.end_fast_interaction)
 
     def set_edit_mode(self, enabled: bool) -> None:
         self.edit_mode = enabled
         self.dragging_edit = False
         self.setDragMode(QGraphicsView.NoDrag if enabled else QGraphicsView.ScrollHandDrag)
 
-    def set_overlay(self, image: np.ndarray | None, points: Sequence[tuple[float, float, int]]) -> None:
-        self.scene_obj.clear()
+    @staticmethod
+    def array_image_key(image: np.ndarray) -> tuple[object, ...]:
+        data_ptr = int(image.__array_interface__["data"][0])
+        return (data_ptr, image.shape, image.strides, str(image.dtype))
+
+    def remove_items(self, items: list[QGraphicsItem]) -> None:
+        for item in items:
+            self.scene_obj.removeItem(item)
+        items.clear()
+
+    def clear_prompt_points(self) -> None:
+        self.remove_items(self.point_items)
+
+    def clear_polygon_overlay(self) -> None:
+        self.remove_items(self.polygon_items)
+
+    def set_overlay(
+        self,
+        image: np.ndarray | None,
+        points: Sequence[tuple[float, float, int]],
+        image_key: tuple[object, ...] | None = None,
+    ) -> None:
+        self.clear_prompt_points()
         self.point_items.clear()
-        self.pixmap_item = None
         self.has_image = image is not None
 
         if image is None:
+            self.scene_obj.clear()
+            self.pixmap_item = None
+            self.pixmap_key = None
+            self.image_size = None
+            self.point_items.clear()
+            self.polygon_items.clear()
             self.scene_obj.setSceneRect(0, 0, 100, 100)
             return
 
         image = np.ascontiguousarray(image)
         height, width = image.shape[:2]
-        qimage = QImage(image.data, width, height, 3 * width, QImage.Format_RGB888).copy()
-        self.pixmap_item = self.scene_obj.addPixmap(QPixmap.fromImage(qimage))
-        self.scene_obj.setSceneRect(0, 0, width, height)
+        key = image_key or self.array_image_key(image)
+        if self.pixmap_item is None or self.pixmap_key != key:
+            qimage = QImage(image.data, width, height, int(image.strides[0]), QImage.Format_RGB888).copy()
+            pixmap = QPixmap.fromImage(qimage)
+            if self.pixmap_item is None:
+                self.pixmap_item = self.scene_obj.addPixmap(pixmap)
+                self.pixmap_item.setZValue(0)
+                self.pixmap_item.setShapeMode(QGraphicsPixmapItem.BoundingRectShape)
+                self.pixmap_item.setTransformationMode(Qt.FastTransformation)
+            else:
+                self.pixmap_item.setPixmap(pixmap)
+            self.pixmap_key = key
+            self.image_size = (height, width)
+            self.scene_obj.setSceneRect(0, 0, width, height)
         self.draw_points(points)
 
     def draw_points(self, points: Sequence[tuple[float, float, int]]) -> None:
@@ -133,25 +249,191 @@ class SamCanvasView(QGraphicsView):
             self.scene_obj.addItem(item)
             self.point_items.append(item)
 
+    def add_polygon_path(
+        self,
+        points: np.ndarray,
+        color: tuple[int, int, int],
+        thickness: int,
+        *,
+        closed: bool,
+    ) -> None:
+        if len(points) < 2:
+            return
+        path = QPainterPath()
+        path.moveTo(float(points[0][0]), float(points[0][1]))
+        for x, y in points[1:]:
+            path.lineTo(float(x), float(y))
+        if closed:
+            path.closeSubpath()
+        item = QGraphicsPathItem(path)
+        pen = QPen(QColor(*color), thickness)
+        pen.setJoinStyle(Qt.RoundJoin)
+        pen.setCapStyle(Qt.RoundCap)
+        item.setPen(pen)
+        item.setBrush(QBrush(Qt.NoBrush))
+        item.setZValue(20)
+        self.scene_obj.addItem(item)
+        self.polygon_items.append(item)
+
+    def add_vertex_handle(self, x: float, y: float, radius: int, color: tuple[int, int, int]) -> None:
+        item = QGraphicsEllipseItem(float(x) - radius, float(y) - radius, radius * 2, radius * 2)
+        item.setBrush(QBrush(QColor(255, 255, 255)))
+        item.setPen(QPen(QColor(*color), 2))
+        item.setZValue(30)
+        self.scene_obj.addItem(item)
+        self.polygon_items.append(item)
+
+    def set_polygon_overlay(
+        self,
+        saved_objects: Sequence[SavedObject],
+        selected_object_index: int = -2,
+        selected_polygon_index: int = -1,
+        selected_vertex_index: int = -1,
+        draft_polygon: Sequence[tuple[float, float]] | None = None,
+        draft_mode: str = "add",
+        current_yolo_polygons: Sequence[dict[str, object]] | None = None,
+        current_color: np.ndarray | None = None,
+    ) -> None:
+        self.clear_polygon_overlay()
+        if not self.has_image:
+            return
+
+        items: list[tuple[int, np.ndarray, Sequence[dict[str, object]]]] = []
+        if current_yolo_polygons is not None:
+            color = current_color if current_color is not None else np.array([56, 217, 197], dtype=np.uint8)
+            items.append((-1, color.astype(np.uint8), current_yolo_polygons))
+        for object_index, saved in enumerate(saved_objects):
+            items.append((object_index, saved.color.astype(np.uint8), saved.yolo_polygons))
+
+        for object_index, color, polygons in items:
+            selected_object = object_index == selected_object_index
+            for polygon_index, item in enumerate(normalize_yolo_edit_polygons(polygons)):
+                points = np.rint(np.asarray(item["points"], dtype=np.float32)).astype(np.int32)
+                if len(points) < 2:
+                    continue
+                if item["mode"] == "subtract":
+                    color_tuple = (255, 210, 80)
+                else:
+                    color_tuple = tuple(int(value) for value in color.tolist())
+                thickness = 3 if selected_object and polygon_index == selected_polygon_index else 2
+                self.add_polygon_path(points, color_tuple, thickness, closed=True)
+                if selected_object:
+                    for vertex_index, (x, y) in enumerate(points):
+                        radius = 6 if polygon_index == selected_polygon_index and vertex_index == selected_vertex_index else 4
+                        self.add_vertex_handle(float(x), float(y), radius, color_tuple)
+
+        if draft_polygon:
+            points = np.rint(np.asarray(draft_polygon, dtype=np.float32)).astype(np.int32)
+            color_tuple = (255, 210, 80) if draft_mode == "subtract" else (56, 217, 197)
+            self.add_polygon_path(points, color_tuple, 2, closed=False)
+            for x, y in points:
+                self.add_vertex_handle(float(x), float(y), 5, color_tuple)
+
     @staticmethod
     def event_pos(event):
         return event.position().toPoint() if hasattr(event, "position") else event.pos()
 
+    def begin_fast_interaction(self) -> None:
+        if not self.fast_interaction:
+            self.fast_interaction = True
+            self.setRenderHint(QPainter.Antialiasing, False)
+        self.fast_interaction_timer.start(120)
+
+    def end_fast_interaction(self) -> None:
+        if self.pan_timer.isActive() or self.zoom_timer.isActive():
+            self.fast_interaction_timer.start(120)
+            return
+        if self.fast_interaction:
+            self.fast_interaction = False
+            self.setRenderHint(QPainter.Antialiasing, True)
+            self.viewport().update()
+
+    def queue_pan_delta(self, dx: int, dy: int) -> None:
+        if dx == 0 and dy == 0:
+            return
+        self.begin_fast_interaction()
+        self.pending_pan_dx += int(dx)
+        self.pending_pan_dy += int(dy)
+        if not self.pan_timer.isActive():
+            self.pan_timer.start(8)
+
+    def apply_pending_pan(self) -> None:
+        dx = self.pending_pan_dx
+        dy = self.pending_pan_dy
+        self.pending_pan_dx = 0
+        self.pending_pan_dy = 0
+        if dx == 0 and dy == 0:
+            return
+        self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - dx)
+        self.verticalScrollBar().setValue(self.verticalScrollBar().value() - dy)
+        self.fast_interaction_timer.start(120)
+
+    def flush_pending_pan(self) -> None:
+        if self.pan_timer.isActive():
+            self.pan_timer.stop()
+        self.apply_pending_pan()
+
+    def queue_zoom_steps(self, steps: float, anchor) -> None:
+        if steps == 0:
+            return
+        self.begin_fast_interaction()
+        self.pending_zoom_steps += float(steps)
+        self.pending_zoom_anchor = anchor
+        if not self.zoom_timer.isActive():
+            self.zoom_timer.start(8)
+
+    def apply_pending_zoom(self) -> None:
+        steps = self.pending_zoom_steps
+        anchor = self.pending_zoom_anchor or self.viewport().rect().center()
+        self.pending_zoom_steps = 0.0
+        self.pending_zoom_anchor = None
+        if steps == 0:
+            return
+        factor = 1.15 ** steps
+        self.zoom_at(anchor, factor)
+        self.fast_interaction_timer.start(120)
+
+    def flush_pending_zoom(self) -> None:
+        if self.zoom_timer.isActive():
+            self.zoom_timer.stop()
+        self.apply_pending_zoom()
+
+    def zoom_at(self, viewport_pos, factor: float) -> None:
+        if factor <= 0:
+            return
+        scene_pos = self.mapToScene(viewport_pos)
+        self.scale(factor, factor)
+        new_view_pos = self.mapFromScene(scene_pos)
+        delta = new_view_pos - viewport_pos
+        self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() + int(delta.x()))
+        self.verticalScrollBar().setValue(self.verticalScrollBar().value() + int(delta.y()))
+
+    def zoom_by(self, factor: float) -> None:
+        self.begin_fast_interaction()
+        self.zoom_at(self.viewport().rect().center(), factor)
+        self.fast_interaction_timer.start(120)
+
     def fit_image(self) -> None:
         if self.has_image:
+            self.flush_pending_pan()
+            self.flush_pending_zoom()
             self.fitInView(self.scene_obj.sceneRect(), Qt.KeepAspectRatio)
 
     def wheelEvent(self, event) -> None:
         if not self.has_image:
             super().wheelEvent(event)
             return
-        factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-        self.scale(factor, factor)
+        steps = float(event.angleDelta().y()) / 120.0
+        if steps == 0:
+            steps = float(event.pixelDelta().y()) / 240.0
+        self.queue_zoom_steps(steps, self.event_pos(event))
+        event.accept()
 
     def mousePressEvent(self, event) -> None:
         if self.has_image and event.button() == Qt.MiddleButton:
             self.middle_panning = True
             self.last_pan_pos = self.event_pos(event)
+            self.begin_fast_interaction()
             self.setCursor(Qt.ClosedHandCursor)
             event.accept()
             return
@@ -176,8 +458,7 @@ class SamCanvasView(QGraphicsView):
             pos = self.event_pos(event)
             delta = pos - self.last_pan_pos
             self.last_pan_pos = pos
-            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - int(delta.x()))
-            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(delta.y()))
+            self.queue_pan_delta(int(delta.x()), int(delta.y()))
             event.accept()
             return
         if self.has_image and self.edit_mode and self.dragging_edit:
@@ -192,6 +473,8 @@ class SamCanvasView(QGraphicsView):
         if self.middle_panning and event.button() == Qt.MiddleButton:
             self.middle_panning = False
             self.last_pan_pos = None
+            self.flush_pending_pan()
+            self.fast_interaction_timer.start(80)
             self.unsetCursor()
             event.accept()
             return
@@ -262,7 +545,7 @@ class PySideSamWindow(QMainWindow):
         self.overlay_cache: np.ndarray | None = None
         self.render_pending = False
         self.render_pending_fit = False
-        self.render_interval_ms = 33
+        self.render_interval_ms = 16
         self.last_render_time = 0.0
         self.dirty = False
 
@@ -420,7 +703,7 @@ class PySideSamWindow(QMainWindow):
 
         jump_row = QHBoxLayout()
         jump_row.setSpacing(6)
-        self.image_jump_spin = QSpinBox()
+        self.image_jump_spin = StepWheelSpinBox()
         self.image_jump_spin.setRange(1, 1)
         self.image_jump_spin.setPrefix("Image ")
         self.image_jump_spin.setEnabled(False)
@@ -468,11 +751,11 @@ class PySideSamWindow(QMainWindow):
 
         layout.addWidget(self.section("View"))
         zoom_out = QPushButton("-")
-        zoom_out.clicked.connect(lambda: self.canvas.scale(1 / 1.18, 1 / 1.18))
+        zoom_out.clicked.connect(lambda: self.canvas.zoom_by(1 / 1.18))
         fit = QPushButton("Fit")
         fit.clicked.connect(self.canvas_fit)
         zoom_in = QPushButton("+")
-        zoom_in.clicked.connect(lambda: self.canvas.scale(1.18, 1.18))
+        zoom_in.clicked.connect(lambda: self.canvas.zoom_by(1.18))
         self.add_button_row(layout, zoom_out, fit, zoom_in)
         layout.addStretch(1)
 
@@ -487,7 +770,7 @@ class PySideSamWindow(QMainWindow):
         self.hough_debug_check.toggled.connect(self.refresh_hough_preview)
         layout.addWidget(self.hough_debug_check)
 
-        self.hough_crop_size_spin = QSpinBox()
+        self.hough_crop_size_spin = StepWheelSpinBox()
         self.hough_crop_size_spin.setRange(0, 8192)
         self.hough_crop_size_spin.setValue(0)
         self.hough_crop_size_spin.setSpecialValueText("native crop")
@@ -497,7 +780,7 @@ class PySideSamWindow(QMainWindow):
         self.hough_crop_size_spin.setToolTip("0 keeps the adaptive crop at its native size. Set a pixel value to force resize.")
         layout.addWidget(self.hough_crop_size_spin)
 
-        self.hough_inner_scale_spin = QDoubleSpinBox()
+        self.hough_inner_scale_spin = StepWheelDoubleSpinBox()
         self.hough_inner_scale_spin.setRange(0.1, 1.5)
         self.hough_inner_scale_spin.setSingleStep(0.02)
         self.hough_inner_scale_spin.setDecimals(2)
@@ -505,7 +788,7 @@ class PySideSamWindow(QMainWindow):
         self.hough_inner_scale_spin.setPrefix("Inner x")
         layout.addWidget(self.hough_inner_scale_spin)
 
-        self.hough_crop_scale_spin = QDoubleSpinBox()
+        self.hough_crop_scale_spin = StepWheelDoubleSpinBox()
         self.hough_crop_scale_spin.setRange(0.1, 1.5)
         self.hough_crop_scale_spin.setSingleStep(0.02)
         self.hough_crop_scale_spin.setDecimals(2)
@@ -531,7 +814,7 @@ class PySideSamWindow(QMainWindow):
 
         layout = self.make_tab_layout(tabs, "Labels")
         layout.addWidget(self.section("Dataset Export"))
-        self.class_spin = QSpinBox()
+        self.class_spin = StepWheelSpinBox()
         self.class_spin.setRange(0, 9999)
         self.class_spin.setValue(0)
         self.class_spin.setPrefix("Class ")
@@ -550,7 +833,7 @@ class PySideSamWindow(QMainWindow):
         self.yolo_preview_check.toggled.connect(lambda _checked: self.render_canvas())
         layout.addWidget(self.yolo_preview_check)
 
-        self.yolo_epsilon_spin = QDoubleSpinBox()
+        self.yolo_epsilon_spin = StepWheelDoubleSpinBox()
         self.yolo_epsilon_spin.setRange(0.0, 30.0)
         self.yolo_epsilon_spin.setSingleStep(0.5)
         self.yolo_epsilon_spin.setDecimals(1)
@@ -559,7 +842,7 @@ class PySideSamWindow(QMainWindow):
         self.yolo_epsilon_spin.valueChanged.connect(self.on_yolo_polygon_settings_changed)
         layout.addWidget(self.yolo_epsilon_spin)
 
-        self.yolo_min_area_spin = QDoubleSpinBox()
+        self.yolo_min_area_spin = StepWheelDoubleSpinBox()
         self.yolo_min_area_spin.setRange(0.0, 10000.0)
         self.yolo_min_area_spin.setSingleStep(1.0)
         self.yolo_min_area_spin.setDecimals(1)
@@ -641,6 +924,25 @@ class PySideSamWindow(QMainWindow):
         self.move_target_combo.addItem("Move target: active mask", "current")
         self.move_target_combo.addItem("Move target: selected object", "object")
         layout.addWidget(self.move_target_combo)
+
+        layout.addWidget(self.section("Auto Polygon Detail"))
+        self.edit_yolo_epsilon_spin = StepWheelDoubleSpinBox()
+        self.edit_yolo_epsilon_spin.setRange(0.0, 30.0)
+        self.edit_yolo_epsilon_spin.setSingleStep(0.5)
+        self.edit_yolo_epsilon_spin.setDecimals(1)
+        self.edit_yolo_epsilon_spin.setValue(float(self.yolo_epsilon_spin.value()))
+        self.edit_yolo_epsilon_spin.setPrefix("Epsilon ")
+        self.edit_yolo_epsilon_spin.valueChanged.connect(self.set_yolo_epsilon_from_edit)
+        layout.addWidget(self.edit_yolo_epsilon_spin)
+
+        self.edit_yolo_min_area_spin = StepWheelDoubleSpinBox()
+        self.edit_yolo_min_area_spin.setRange(0.0, 10000.0)
+        self.edit_yolo_min_area_spin.setSingleStep(1.0)
+        self.edit_yolo_min_area_spin.setDecimals(1)
+        self.edit_yolo_min_area_spin.setValue(float(self.yolo_min_area_spin.value()))
+        self.edit_yolo_min_area_spin.setPrefix("Min area ")
+        self.edit_yolo_min_area_spin.valueChanged.connect(self.set_yolo_min_area_from_edit)
+        layout.addWidget(self.edit_yolo_min_area_spin)
 
         self.draft_polygon_combo = QComboBox()
         self.draft_polygon_combo.addItem("Draw add region", "add")
@@ -2367,15 +2669,93 @@ class PySideSamWindow(QMainWindow):
             saved.mask = yolo_edit_polygons_to_mask(saved.yolo_polygons, self.image_np.shape)
             self.dirty = True
 
+    def sync_edit_polygon_detail_controls(self) -> None:
+        if hasattr(self, "edit_yolo_epsilon_spin"):
+            previous_block = self.edit_yolo_epsilon_spin.blockSignals(True)
+            try:
+                self.edit_yolo_epsilon_spin.setValue(float(self.yolo_epsilon_spin.value()))
+            finally:
+                self.edit_yolo_epsilon_spin.blockSignals(previous_block)
+        if hasattr(self, "edit_yolo_min_area_spin"):
+            previous_block = self.edit_yolo_min_area_spin.blockSignals(True)
+            try:
+                self.edit_yolo_min_area_spin.setValue(float(self.yolo_min_area_spin.value()))
+            finally:
+                self.edit_yolo_min_area_spin.blockSignals(previous_block)
+
+    def set_yolo_epsilon_from_edit(self, value: float) -> None:
+        previous_block = self.yolo_epsilon_spin.blockSignals(True)
+        try:
+            self.yolo_epsilon_spin.setValue(float(value))
+        finally:
+            self.yolo_epsilon_spin.blockSignals(previous_block)
+        self.on_yolo_polygon_settings_changed(value)
+
+    def set_yolo_min_area_from_edit(self, value: float) -> None:
+        previous_block = self.yolo_min_area_spin.blockSignals(True)
+        try:
+            self.yolo_min_area_spin.setValue(float(value))
+        finally:
+            self.yolo_min_area_spin.blockSignals(previous_block)
+        self.on_yolo_polygon_settings_changed(value)
+
+    def polygon_detail_target_index(self) -> int | None:
+        if self.current_mask is not None:
+            return -1
+        if hasattr(self, "whole_mask_drag_check") and self.whole_mask_drag_check.isChecked():
+            move_target_index = self.selected_move_target_index()
+            if move_target_index is not None:
+                return move_target_index
+        object_index = self.selected_object_index()
+        if object_index >= 0:
+            return object_index
+        if len(self.saved_objects) == 1:
+            return 0
+        return None
+
+    def regenerate_polygons_for_target(self, target_index: int) -> bool:
+        mask = self.mask_for_target(target_index)
+        if mask is None or not mask.any():
+            return False
+        existing_polygons = self.clone_yolo_polygons(self.polygons_for_target(target_index))
+        polygons = mask_to_yolo_edit_polygons(
+            mask,
+            epsilon=float(self.yolo_epsilon_spin.value()),
+            min_area=float(self.yolo_min_area_spin.value()),
+        )
+        if not polygons and existing_polygons:
+            self.set_status("Polygon detail produced no usable polygon; kept current polygons")
+            return False
+        if polygons == existing_polygons:
+            return False
+        self.push_undo_state("polygon detail")
+        if target_index == -1:
+            self.current_yolo_polygons = polygons
+            self.current_yolo_dirty = False
+        elif 0 <= target_index < len(self.saved_objects):
+            self.saved_objects[target_index].yolo_polygons = polygons
+            self.dirty = True
+        else:
+            return False
+        self.selected_polygon_index = -1
+        self.selected_vertex_index = -1
+        return True
+
     def on_yolo_polygon_settings_changed(self, _value) -> None:
-        if self.current_mask is not None and not self.current_yolo_dirty:
-            self.current_yolo_polygons = mask_to_yolo_edit_polygons(
-                self.current_mask,
-                epsilon=float(self.yolo_epsilon_spin.value()),
-                min_area=float(self.yolo_min_area_spin.value()),
-            )
-            self.selected_polygon_index = -1
-            self.selected_vertex_index = -1
+        self.sync_edit_polygon_detail_controls()
+        target_index = self.polygon_detail_target_index()
+        edit_enabled = bool(
+            hasattr(self, "polygon_edit_check") and self.polygon_edit_check.isChecked()
+        )
+        changed = False
+        if target_index is not None:
+            can_regenerate = not edit_enabled
+            if target_index == -1 and not self.current_yolo_dirty:
+                can_regenerate = True
+            if can_regenerate:
+                changed = self.regenerate_polygons_for_target(target_index)
+        if changed and target_index >= 0:
+            self.update_object_list()
         self.render_canvas()
 
     def set_polygon_edit_enabled(self, enabled: bool) -> None:
@@ -2387,6 +2767,14 @@ class PySideSamWindow(QMainWindow):
         if enabled and self.current_mask is None and self.selected_object_index() < 0 and self.saved_objects:
             self.objects_list.setCurrentRow(0)
         if not enabled:
+            changed_target: int | None = None
+            if self.edit_drag_target is not None:
+                changed_target = self.edit_drag_target[0]
+            elif self.edit_move_target is not None:
+                changed_target = self.edit_move_target[0]
+            if changed_target is not None:
+                self.rebuild_target_mask_from_polygons(changed_target)
+                self.update_object_list()
             self.edit_drag_target = None
             self.edit_move_target = None
             self.draft_polygon_points.clear()
@@ -2879,7 +3267,7 @@ class PySideSamWindow(QMainWindow):
         try:
             self.objects_list.clear()
             for index, saved in enumerate(self.saved_objects, start=1):
-                area = int(saved.mask.astype(bool).sum())
+                area = int(np.count_nonzero(saved.mask))
                 polygon_count = len(saved.yolo_polygons)
                 self.objects_list.addItem(
                     f"{index}. class={saved.class_id}  area={area}  polygons={polygon_count}  score={saved.score:.3f}"
@@ -2996,19 +3384,12 @@ class PySideSamWindow(QMainWindow):
             if hasattr(self, "yolo_preview_label"):
                 self.yolo_preview_label.setText("Polygon preview: off")
             return
+        overlay_key: tuple[object, ...] | None = None
+        polygon_overlay = False
         if hasattr(self, "polygon_edit_check") and self.polygon_edit_check.isChecked():
             overlay = self.cached_interactive_overlay()
-            overlay = render_yolo_edit_polygon_overlay(
-                overlay,
-                self.saved_objects,
-                selected_object_index=self.rendered_polygon_target_index(),
-                selected_polygon_index=self.selected_polygon_index,
-                selected_vertex_index=self.selected_vertex_index,
-                draft_polygon=self.draft_polygon_points,
-                draft_mode=str(self.draft_polygon_combo.currentData() or "add"),
-                current_yolo_polygons=self.current_yolo_polygons if self.current_mask is not None else None,
-                current_color=self.current_color,
-            )
+            overlay_key = ("interactive", self.overlay_cache_key)
+            polygon_overlay = True
             total_polygons = len(self.current_yolo_polygons) + sum(len(saved.yolo_polygons) for saved in self.saved_objects)
             self.yolo_preview_label.setText(f"Editable polygons: {total_polygons}")
         elif self.yolo_preview_check.isChecked():
@@ -3022,12 +3403,27 @@ class PySideSamWindow(QMainWindow):
                 epsilon=float(self.yolo_epsilon_spin.value()),
                 min_area=float(self.yolo_min_area_spin.value()),
             )
+            overlay_key = ("yolo_preview", self.last_render_time, id(overlay))
             self.yolo_preview_label.setText(f"YOLO polygons: {polygon_count}")
         else:
             overlay = self.cached_interactive_overlay()
+            overlay_key = ("interactive", self.overlay_cache_key)
             self.yolo_preview_label.setText("Polygon preview: off")
         show_prompt_points = not (hasattr(self, "polygon_edit_check") and self.polygon_edit_check.isChecked())
-        self.canvas.set_overlay(overlay, self.points if show_prompt_points else [])
+        self.canvas.set_overlay(overlay, self.points if show_prompt_points else [], image_key=overlay_key)
+        if polygon_overlay:
+            self.canvas.set_polygon_overlay(
+                self.saved_objects,
+                selected_object_index=self.rendered_polygon_target_index(),
+                selected_polygon_index=self.selected_polygon_index,
+                selected_vertex_index=self.selected_vertex_index,
+                draft_polygon=self.draft_polygon_points,
+                draft_mode=str(self.draft_polygon_combo.currentData() or "add"),
+                current_yolo_polygons=self.current_yolo_polygons if self.current_mask is not None else None,
+                current_color=self.current_color,
+            )
+        else:
+            self.canvas.clear_polygon_overlay()
         if fit:
             QTimer.singleShot(0, self.canvas.fit_image)
 

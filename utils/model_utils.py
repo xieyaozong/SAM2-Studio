@@ -10,6 +10,18 @@ from utils.config import LogFn, MODEL_PRESETS, PROJECT_ROOT, RESOURCE_ROOT, SamB
 import torch
 
 
+def configure_torch_runtime(device: torch.device) -> None:
+    if device.type != "cuda":
+        return
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
+
+
 def select_device(device_name: str) -> torch.device:
     if device_name == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -41,6 +53,7 @@ def resolve_model_paths(config: SamBatchConfig) -> tuple[str, Path]:
 
 def build_mask_generator(config: SamBatchConfig, log: LogFn) -> tuple[SAM2AutomaticMaskGenerator, torch.device]:
     device = select_device(config.device)
+    configure_torch_runtime(device)
     model_cfg, checkpoint = resolve_model_paths(config)
 
     log(f"Loading SAM 2 model: {config.model_size} on {device}")
@@ -75,6 +88,7 @@ def build_image_predictor(
         device=device_name,
     )
     device = select_device(config.device)
+    configure_torch_runtime(device)
     resolved_cfg, resolved_checkpoint = resolve_model_paths(config)
 
     log(f"Loading SAM 2 predictor: {model_size} on {device}")
