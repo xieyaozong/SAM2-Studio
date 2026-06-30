@@ -9,7 +9,7 @@
 
 Windows desktop label-assist tool for building segmentation datasets with Meta's Segment Anything Model 2. It combines SAM2 prompts, optional Hough preprocessing, editable mask polygons, SAM-assisted hole cutting, whole-target moves, and export-ready YOLO / Mask R-CNN labels.
 
-![Workflow](assets/workflow.png)
+![SAM2 Studio interface](assets/interface.png)
 
 ## What It Does
 
@@ -27,8 +27,6 @@ Windows desktop label-assist tool for building segmentation datasets with Meta's
 - Builds a ready-to-run Windows executable.
 
 ## Interface
-
-![Interface layout](assets/interface.png)
 
 The app centers on an image canvas with SAM prompts, mask overlays, editable polygons, middle-mouse panning, and wheel zoom. Side tabs separate image input, Hough preprocessing, label export, object review, reusable templates, polygon edits, whole-target moves, and SAM Hole cutting.
 
