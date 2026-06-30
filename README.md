@@ -17,8 +17,8 @@ Windows desktop label-assist tool for building segmentation datasets with Meta's
 - Uses foreground/background prompts to create active SAM2 masks.
 - Applies optional Hough masking or center-crop preprocessing before annotation.
 - Converts masks into editable add/cut polygons, with undo support for manual edits.
-- Keeps manual polygon edits intact when edit mode is toggled; Epsilon / Min area only rebuild polygons when those values are changed.
-- Provides Epsilon / Min area controls from both the Labels and Edit tabs, including mouse-wheel value changes.
+- Keeps manual polygon edits intact when edit mode is toggled; polygon detail only rebuilds when those values are changed.
+- Splits polygon detail controls: the Labels tab adjusts outer mask polygons, while the Edit tab adjusts inner hole polygons.
 - Uses click-to-cut SAM Hole mode to create inner holes inside an existing mask target.
 - Moves an active SAM mask or selected saved object as one target for quick alignment.
 - Reuses crop and polygon templates across similar images.
@@ -40,7 +40,7 @@ Canvas interaction is optimized for repeated annotation work: the base image/ove
 2. Add foreground/background prompts to create an active SAM2 mask.
 3. Add the active mask to the object list.
 4. Refine the target with Polygon mode, whole-target move, or SAM Hole mode.
-5. Adjust Epsilon / Min area when you want a different polygon density.
+5. Adjust outer or hole Epsilon / Min area when you want a different polygon density.
 6. Capture a template when several images share the same crop and mask layout.
 7. Save labels, or use Save & Next to continue through the folder queue.
 

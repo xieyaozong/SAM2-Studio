@@ -60,6 +60,7 @@ from utils.config import (
     SavedObject,
 )
 from utils.export_utils import (
+    mask_to_edit_polygons,
     mask_to_yolo_edit_polygons,
     normalize_yolo_edit_polygons,
     render_interactive_overlay,
@@ -838,7 +839,7 @@ class PySideSamWindow(QMainWindow):
         self.yolo_epsilon_spin.setSingleStep(0.5)
         self.yolo_epsilon_spin.setDecimals(1)
         self.yolo_epsilon_spin.setValue(2.0)
-        self.yolo_epsilon_spin.setPrefix("Epsilon ")
+        self.yolo_epsilon_spin.setPrefix("Outer epsilon ")
         self.yolo_epsilon_spin.valueChanged.connect(self.on_yolo_polygon_settings_changed)
         layout.addWidget(self.yolo_epsilon_spin)
 
@@ -847,7 +848,7 @@ class PySideSamWindow(QMainWindow):
         self.yolo_min_area_spin.setSingleStep(1.0)
         self.yolo_min_area_spin.setDecimals(1)
         self.yolo_min_area_spin.setValue(8.0)
-        self.yolo_min_area_spin.setPrefix("Min area ")
+        self.yolo_min_area_spin.setPrefix("Outer min area ")
         self.yolo_min_area_spin.valueChanged.connect(self.on_yolo_polygon_settings_changed)
         layout.addWidget(self.yolo_min_area_spin)
 
@@ -925,23 +926,23 @@ class PySideSamWindow(QMainWindow):
         self.move_target_combo.addItem("Move target: selected object", "object")
         layout.addWidget(self.move_target_combo)
 
-        layout.addWidget(self.section("Auto Polygon Detail"))
+        layout.addWidget(self.section("Hole Polygon Detail"))
         self.edit_yolo_epsilon_spin = StepWheelDoubleSpinBox()
         self.edit_yolo_epsilon_spin.setRange(0.0, 30.0)
         self.edit_yolo_epsilon_spin.setSingleStep(0.5)
         self.edit_yolo_epsilon_spin.setDecimals(1)
-        self.edit_yolo_epsilon_spin.setValue(float(self.yolo_epsilon_spin.value()))
-        self.edit_yolo_epsilon_spin.setPrefix("Epsilon ")
-        self.edit_yolo_epsilon_spin.valueChanged.connect(self.set_yolo_epsilon_from_edit)
+        self.edit_yolo_epsilon_spin.setValue(2.0)
+        self.edit_yolo_epsilon_spin.setPrefix("Hole epsilon ")
+        self.edit_yolo_epsilon_spin.valueChanged.connect(self.on_hole_polygon_settings_changed)
         layout.addWidget(self.edit_yolo_epsilon_spin)
 
         self.edit_yolo_min_area_spin = StepWheelDoubleSpinBox()
         self.edit_yolo_min_area_spin.setRange(0.0, 10000.0)
         self.edit_yolo_min_area_spin.setSingleStep(1.0)
         self.edit_yolo_min_area_spin.setDecimals(1)
-        self.edit_yolo_min_area_spin.setValue(float(self.yolo_min_area_spin.value()))
-        self.edit_yolo_min_area_spin.setPrefix("Min area ")
-        self.edit_yolo_min_area_spin.valueChanged.connect(self.set_yolo_min_area_from_edit)
+        self.edit_yolo_min_area_spin.setValue(8.0)
+        self.edit_yolo_min_area_spin.setPrefix("Hole min area ")
+        self.edit_yolo_min_area_spin.valueChanged.connect(self.on_hole_polygon_settings_changed)
         layout.addWidget(self.edit_yolo_min_area_spin)
 
         self.draft_polygon_combo = QComboBox()
@@ -2669,36 +2670,6 @@ class PySideSamWindow(QMainWindow):
             saved.mask = yolo_edit_polygons_to_mask(saved.yolo_polygons, self.image_np.shape)
             self.dirty = True
 
-    def sync_edit_polygon_detail_controls(self) -> None:
-        if hasattr(self, "edit_yolo_epsilon_spin"):
-            previous_block = self.edit_yolo_epsilon_spin.blockSignals(True)
-            try:
-                self.edit_yolo_epsilon_spin.setValue(float(self.yolo_epsilon_spin.value()))
-            finally:
-                self.edit_yolo_epsilon_spin.blockSignals(previous_block)
-        if hasattr(self, "edit_yolo_min_area_spin"):
-            previous_block = self.edit_yolo_min_area_spin.blockSignals(True)
-            try:
-                self.edit_yolo_min_area_spin.setValue(float(self.yolo_min_area_spin.value()))
-            finally:
-                self.edit_yolo_min_area_spin.blockSignals(previous_block)
-
-    def set_yolo_epsilon_from_edit(self, value: float) -> None:
-        previous_block = self.yolo_epsilon_spin.blockSignals(True)
-        try:
-            self.yolo_epsilon_spin.setValue(float(value))
-        finally:
-            self.yolo_epsilon_spin.blockSignals(previous_block)
-        self.on_yolo_polygon_settings_changed(value)
-
-    def set_yolo_min_area_from_edit(self, value: float) -> None:
-        previous_block = self.yolo_min_area_spin.blockSignals(True)
-        try:
-            self.yolo_min_area_spin.setValue(float(value))
-        finally:
-            self.yolo_min_area_spin.blockSignals(previous_block)
-        self.on_yolo_polygon_settings_changed(value)
-
     def polygon_detail_target_index(self) -> int | None:
         if self.current_mask is not None:
             return -1
@@ -2713,27 +2684,29 @@ class PySideSamWindow(QMainWindow):
             return 0
         return None
 
-    def regenerate_polygons_for_target(self, target_index: int) -> bool:
-        mask = self.mask_for_target(target_index)
-        if mask is None or not mask.any():
-            return False
-        existing_polygons = self.clone_yolo_polygons(self.polygons_for_target(target_index))
-        polygons = mask_to_yolo_edit_polygons(
-            mask,
-            epsilon=float(self.yolo_epsilon_spin.value()),
-            min_area=float(self.yolo_min_area_spin.value()),
-        )
-        if not polygons and existing_polygons:
-            self.set_status("Polygon detail produced no usable polygon; kept current polygons")
-            return False
-        if polygons == existing_polygons:
-            return False
-        self.push_undo_state("polygon detail")
+    def hole_epsilon(self) -> float:
+        return float(self.edit_yolo_epsilon_spin.value()) if hasattr(self, "edit_yolo_epsilon_spin") else 2.0
+
+    def hole_min_area(self) -> float:
+        return float(self.edit_yolo_min_area_spin.value()) if hasattr(self, "edit_yolo_min_area_spin") else 8.0
+
+    @staticmethod
+    def merge_polygons_by_mode(
+        add_polygons: Sequence[dict[str, object]],
+        subtract_polygons: Sequence[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        return [
+            *PySideSamWindow.clone_yolo_polygons(add_polygons),
+            *PySideSamWindow.clone_yolo_polygons(subtract_polygons),
+        ]
+
+    def set_polygons_for_target(self, target_index: int, polygons: Sequence[dict[str, object]]) -> bool:
+        cloned = self.clone_yolo_polygons(polygons)
         if target_index == -1:
-            self.current_yolo_polygons = polygons
+            self.current_yolo_polygons = cloned
             self.current_yolo_dirty = False
         elif 0 <= target_index < len(self.saved_objects):
-            self.saved_objects[target_index].yolo_polygons = polygons
+            self.saved_objects[target_index].yolo_polygons = cloned
             self.dirty = True
         else:
             return False
@@ -2741,19 +2714,65 @@ class PySideSamWindow(QMainWindow):
         self.selected_vertex_index = -1
         return True
 
-    def on_yolo_polygon_settings_changed(self, _value) -> None:
-        self.sync_edit_polygon_detail_controls()
-        target_index = self.polygon_detail_target_index()
-        edit_enabled = bool(
-            hasattr(self, "polygon_edit_check") and self.polygon_edit_check.isChecked()
+    def regenerate_outer_polygons_for_target(self, target_index: int) -> bool:
+        mask = self.mask_for_target(target_index)
+        if mask is None or not mask.any():
+            return False
+        existing_polygons = self.clone_yolo_polygons(self.polygons_for_target(target_index))
+        existing_subtract = [item for item in existing_polygons if item.get("mode") == "subtract"]
+        new_add = mask_to_yolo_edit_polygons(
+            mask,
+            epsilon=float(self.yolo_epsilon_spin.value()),
+            min_area=float(self.yolo_min_area_spin.value()),
         )
+        if not new_add and any(item.get("mode") == "add" for item in existing_polygons):
+            self.set_status("Outer detail produced no usable polygon; kept current polygons")
+            return False
+        polygons = self.merge_polygons_by_mode(new_add, existing_subtract)
+        if polygons == existing_polygons:
+            return False
+        self.push_undo_state("outer polygon detail")
+        return self.set_polygons_for_target(target_index, polygons)
+
+    def regenerate_hole_polygons_for_target(self, target_index: int) -> bool:
+        mask = self.mask_for_target(target_index)
+        if mask is None or not mask.any():
+            return False
+        existing_polygons = self.clone_yolo_polygons(self.polygons_for_target(target_index))
+        existing_add = [item for item in existing_polygons if item.get("mode") == "add"]
+        existing_subtract = [item for item in existing_polygons if item.get("mode") == "subtract"]
+        extracted = mask_to_edit_polygons(
+            mask,
+            epsilon=self.hole_epsilon(),
+            min_area=self.hole_min_area(),
+        )
+        new_subtract = [item for item in extracted if item.get("mode") == "subtract"]
+        if not new_subtract:
+            if existing_subtract:
+                self.set_status("Hole detail produced no usable hole polygon; kept current holes")
+            else:
+                self.set_status("No inner hole polygon to refine")
+            return False
+        polygons = self.merge_polygons_by_mode(existing_add, new_subtract)
+        if polygons == existing_polygons:
+            return False
+        self.push_undo_state("hole polygon detail")
+        return self.set_polygons_for_target(target_index, polygons)
+
+    def on_yolo_polygon_settings_changed(self, _value) -> None:
+        target_index = self.polygon_detail_target_index()
         changed = False
         if target_index is not None:
-            can_regenerate = not edit_enabled
-            if target_index == -1 and not self.current_yolo_dirty:
-                can_regenerate = True
-            if can_regenerate:
-                changed = self.regenerate_polygons_for_target(target_index)
+            changed = self.regenerate_outer_polygons_for_target(target_index)
+        if changed and target_index is not None and target_index >= 0:
+            self.update_object_list()
+        self.render_canvas()
+
+    def on_hole_polygon_settings_changed(self, _value) -> None:
+        target_index = self.polygon_detail_target_index()
+        changed = False
+        if target_index is not None:
+            changed = self.regenerate_hole_polygons_for_target(target_index)
         if changed and target_index >= 0:
             self.update_object_list()
         self.render_canvas()
@@ -3068,8 +3087,8 @@ class PySideSamWindow(QMainWindow):
 
         hole_polygons = mask_to_yolo_edit_polygons(
             clipped_hole,
-            epsilon=float(self.yolo_epsilon_spin.value()),
-            min_area=float(self.yolo_min_area_spin.value()),
+            epsilon=self.hole_epsilon(),
+            min_area=self.hole_min_area(),
         )
         if not hole_polygons:
             self.set_status("SAM hole had no usable polygon")
